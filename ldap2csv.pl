@@ -1,5 +1,6 @@
 #!/bin/sh
 eval 'perl --version >/dev/null 2>&1 || { echo "No Perl interpreter found";exit 1; }';
+
 #! -*-perl-*-
 eval 'exec perl -x -wS $0 ${1+"$@"}'
   if 0;
@@ -17,6 +18,7 @@ sub usage;
 sub AUTOLOAD;
 sub is_text_file;
 sub verbose;
+sub process_config_file;
 sub init_options;
 sub select_operation_mode;
 sub process_options;
@@ -56,10 +58,11 @@ BEGIN {
     # checks for the module.
     # Others modules, we just simply import them as usual.
     my $simple_mods = [
-        q{Getopt::Long},    q{File::Basename},    q{Data::Dumper},          q{Data::Dump},
-        q{Net::LDAP},       q{Net::LDAP::Filter}, q{Net::LDAP::LDIF},       q{Net::LDAP::Schema},
-        q{Net::LDAP::Util}, q{Net::LDAP::DSML},   q{File::MimeInfo::Magic}, q{Net::DNS},
-        q{Term::ANSIColor}, q{Term::ReadKey},     q{Text::Wrap},            q{Text::CSV_XS},
+        q{Getopt::Long},      q{Cwd},              q{File::Basename},    q{Data::Dumper},
+        q{Data::Dump},        q{Net::LDAP},        q{Net::LDAP::Filter}, q{Net::LDAP::LDIF},
+        q{Net::LDAP::Schema}, q{Net::LDAP::Util},  q{Net::LDAP::DSML},   q{File::MimeInfo::Magic},
+        q{Net::DNS},          q{Term::ANSIColor},  q{Term::ReadKey},     q{Text::Wrap},
+        q{Text::CSV_XS},      q{Config::IniFiles}, q{Log::Log4perl},
     ];
 
     push @{$simple_mods}, q{Carp} if ( exists $ENV{LDAP2CSV_DEVEL} and $ENV{LDAP2CSV_DEVEL} );
@@ -241,7 +244,14 @@ my $default = {
                 q{cafile} => q{},
             },
         },
-        q{default} => {},
+        q{default} => {
+            q{work mode}           => q{probe},
+            q{private config file} => getcwd . q{.ldap2csv.ini},
+            q{global config file}  => $ENV{HOME} =~ m!/\z!mxs
+            ? $ENV{HOME} . q{.ldap2csv.ini}
+            : $ENV{HOME} . q{/} . q{.ldap2csv.ini},
+            q{system config file} => q{/etc/ldap2csv.ini},
+        },
     },
     q{probe} =>
       { q{options checking} => { q{just one and only one} => { q{input source} => [ q{source}, q{url} ], }, }, },
@@ -300,10 +310,11 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
 
                 my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
                 return if ( $mode ne q{tree2csv} );
-                croak q{The work mode need the --source option.}
+                croak join q{ }, q{The work mode}, $mode, q{need the --source option.}
                   if ( !$cmd->{operation}->{qq[$mode]}->{source}->{value} );
 
-                my ( $source, $init );
+                my ( $source, $init, $attr_from_cmd_line );
+
                 $source = $cmd->{operation}->{qq[$mode]}->{source}->{value};
                 $default->{tree2csv}->{init} = {} if ( not exists $default->{tree2csv}->{init} );
                 $init = $default->{tree2csv}->{init};
@@ -342,9 +353,9 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                       grep { m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
                       @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
 
-                    map { $init->{q[attr that we care]}->{qq[$_]} = 1; }
-                      grep { not m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
-                      @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
+                    $init->{q[attr that we care]}->{qq[$_]} =
+                      [ grep { not m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
+                          @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ];
 
                 }
 
@@ -475,7 +486,6 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                 elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
 
                     my $skip_the_first_line = 1;
-                    my $attr_from_cmd_line;
                     my ( $csv, $h, $row, $attr, $val );
                     $attr = {};
 
@@ -483,7 +493,7 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                         my $hash_ref = $_;
                         map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
                     } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
-                    push @{$attr_from_cmd_line}, keys %{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+                    push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
 
                     $csv = Text::CSV_XS->new(
                         {
@@ -664,7 +674,22 @@ q {In tree2csv work mode, initialize the set from which we will add more if some
             q{type}  => q{s},
             q{value} => [],
             q{help} =>
-q{Set relations for tree2csv work mode, or set attributes for collect work when output format is sql or csv.},
+q{Set relations for tree2csv work mode, or set attributes for collect work mode when output format is sql or csv. We will output the result as orders of this options orders except that when in the tree2csv work mode the first relation is for recursions and we just skip the first one.},
+        },
+        q{config} => {
+            q{help}      => q{Path to config file.},
+            q{type}      => q{s},
+            q{pre audit} => sub {
+                my ( $cmd, $default ) = @_;
+                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+                croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+                croak join q{ }, q{Config file does not exists or is not readable:},
+                  $cmd->{operation}->{qq[$mode]}->{config}->{value}
+                  if (
+                    not(    -e $cmd->{operation}->{qq[$mode]}->{config}->{value}
+                        and -r $cmd->{operation}->{qq[$mode]}->{config}->{value} )
+                  );
+            },
         },
     },
 
@@ -934,7 +959,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
                                 map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
                             } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
                         ),
-                        keys %{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+                        @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
                       ),
                       q{FROM}, $default->{shared}->{DBI}->{q[table name]};
 
@@ -991,7 +1016,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
                                 map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
                             } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
                         ),
-                        keys %{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+                        @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
                     ];
 
                     # OK. Add the init values to the result set.
@@ -1073,16 +1098,16 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
                     goto TREE2CSV_LDIF_REDO if ( $origin_size != $at_last_size );
                 }
                 elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
-                    my $attr_from_cmd_line  = [];
                     my $skip_the_first_line = 1;
                     my ( $csv, $h, $row, $attr, $val );
+                    my $attr_from_cmd_line = [];
                     $attr = {};
 
                     push @{$attr_from_cmd_line}, map {
                         my $hash_ref = $_;
                         map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
                     } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
-                    push @{$attr_from_cmd_line}, keys %{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+                    push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
 
                     {
                         # Add the init set to the result set.
@@ -1192,7 +1217,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
                     my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm,
                         $prefix_of_insert_tbl_stm );
 
-                    $tbl = join q{_}, keys %{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+                    $tbl = join q{_}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
                     $tbl = substr( $tbl, 0, $default->{shared}->{DBI}->{qq[max table name length]} - 1 )
                       if ( length($tbl) > $default->{shared}->{DBI}->{qq[max table name length]} );
                     {
@@ -1203,12 +1228,13 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
                     $create_tbl_stm = join q{ }, q{CREATE TABLE IF NOT EXISTS}, $tbl, q{(},
                       (
                         join q{, },
-                        map { $_ . q[ ] . q[TEXT] } keys %{ $default->{tree2csv}->{init}->{q[attr that we care]} }
+                        map { $_ . q[ ] . q[TEXT] } @{ $default->{tree2csv}->{init}->{q[attr that we care]} }
                       ),
                       q{)};
                     $drop_tbl_stm             = join q{ }, q{DROP TABLE IF EXISTS}, $tbl;
                     $prefix_of_insert_tbl_stm = join q{ }, q{INSERT INTO},          $tbl,
-                      q[(], ( join q{, }, map { $_ } keys %{ $default->{tree2csv}->{init}->{q[attr that we care]} } ),
+                      q[(],
+                      ( join q{, }, map { $_ } @{ $default->{tree2csv}->{init}->{q[attr that we care]} } ),
                       q[)], q{VALUES};
 
                     if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
@@ -1254,6 +1280,9 @@ q{Set relations for tree2csv work mode, or set attributes for collect work when 
 
             },
         },
+    },
+    q{config} => {
+
     },
 };
 
@@ -1795,6 +1824,10 @@ sub import_mod_needed {
     } keys %{$mods};
 }
 
+sub process_config_file {
+    say q{Process config file.};
+}
+
 sub init_options {
     my ( $cmd, $default ) = @_;
 
@@ -1964,12 +1997,7 @@ sub select_operation_mode {
       ( map { q{ } x 4 . $_ } @enabled_modes )
       if ( scalar(@enabled_modes) > 1 );
 
-    @enabled_modes =
-      grep { $cmd->{operation}->{mode}->{qq{$_}}->{value} }
-      keys %{ $cmd->{operation}->{mode} };
-
-    croak join q{: }, q{No enabled mode found, please chose one among},
-      ( join q{ }, map { $_ } keys %{ $cmd->{operation}->{mode} } )
+    $cmd->{operation}->{mode}->{qq[$default->{shared}->{default}->{'work mode'}]}->{value} = 1
       if ( scalar(@enabled_modes) == 0 );
 
     # Welcome mode options go home.

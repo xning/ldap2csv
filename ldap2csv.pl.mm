@@ -116,6 +116,9 @@ It is the who we will probe, or whose data we will search.
 .TP
 \fB\-\-maybe\fR
 It may be the who that we will probe, or whose data we will search.
+.TP
+\fB\-\-relation\fR
+The option gives the attributes that we want. And we will ouput the result as orders of the \-\-relation option orders.  
 .SS The tree2csv mode options:
 .PP
 This work support csv and sql output formats. And the first \-\-realtion option argument should be given as the following formats:
@@ -134,7 +137,7 @@ The work mode only support csv and sql output formats.
 Initialize the set from which we will add more as following the relations set by \-\-relation options.
 .TP
 \fB\-\-relation\fR
-Set relations that we use it to do rescursion to transfer a tree to csv.
+The first option set relations that we use it to do rescursion to transfer a tree to csv, and others gives the attributes that we want. And we will ouput the result as orders of the \-\-relation option orders.  
 .SS About SSL options:
 .PP
 The default action is that we do not verify LDAP servers certificates because it is most possible that LDAP servers use self-signed certificates.
