@@ -42,6 +42,18 @@ sub construct_objectclasses_tree;
 sub get_objectclasses_attrs;
 sub enable_ssl_for_ldap;
 
+sub _pre_audit_for_tree2csv;
+sub _post_audit_for_tree2csv;
+sub _pre_audit_for_csv;
+sub _pre_audit_for_ldif;
+sub _post_audit_for_url;
+sub _pre_audit_for_config;
+sub _output_ldif_for_collect;
+sub _output_sqlite3_for_collect;
+sub _output_csv_for_collect;
+sub _output_csv_for_tree2csv;
+sub _output_ldif_for_tree2csv;
+
 #####################################################################
 # If we import some modules at runtime, we have a chance to do more.#
 # Just as you see, it's some complicated.                           #
@@ -318,253 +330,9 @@ q{Enable collect work mode to collect some who's data, in LDAP terms, some objec
         q{tree2csv} => {
             q{help} =>
 q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do more. If need, this mode will do rescursion.},
-            q{pre audit} => sub {
-                my ( $cmd, $default ) = @_;
+            q{pre audit} => \&_pre_audit_for_tree2csv,
 
-                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-                return if ( $mode ne q{tree2csv} );
-                croak join q{ }, q{The work mode}, $mode, q{need the --source option.}
-                  if ( !$cmd->{operation}->{qq[$mode]}->{source}->{value} );
-
-                my ( $source, $init, $attr_from_cmd_line );
-
-                $source = $cmd->{operation}->{qq[$mode]}->{source}->{value};
-                $default->{tree2csv}->{init} = {} if ( not exists $default->{tree2csv}->{init} );
-                $init = $default->{tree2csv}->{init};
-
-                # To create init rules and sets for doing recursions.
-                {
-
-                    for ( @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } ) {
-                        $init->{set}->{origin}->{qq[$_]} = 1;
-                    }
-
-                    for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
-                        next if ( not m{\A[^:]+:[^:]+:[^:]+(?:[^:]+)*\z} );
-                        my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) = split q[:];
-                        if ( not exists $init->{q[transfer rule]} ) {
-                            croak q{You should give at least the initial set and the recursion attribute.}
-                              if ( not( defined($init_attr) and $init_attr and defined($rec_attr) and $rec_attr ) );
-                            $init->{q[transfer rule]} = [];
-                            if ( defined($init_attr_after_transfer) and $init_attr_after_transfer ) {
-                                push @{ $init->{q[transfer rule]} }, { qq[$init_attr] => $init_attr_after_transfer };
-                            }
-                            else {
-                                push @{ $init->{q[transfer rule]} }, { qq[$init_attr] => $init_attr };
-                            }
-                            if ( defined($rec_attr_after_transfer) and $rec_attr_after_transfer ) {
-                                push @{ $init->{q[transfer rule]} }, { qq[$rec_attr] => $rec_attr_after_transfer };
-                            }
-                            else {
-                                push @{ $init->{q[transfer rule]} }, { qq[$rec_attr] => $rec_attr };
-                            }
-                            $init->{q[recursion attr]} = $rec_attr;
-                        }
-                        else {
-                            croak join qq{\n}, q{More than one recursion relation found:},
-                              ( grep { m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
-                                  @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } );
-                        }
-                    }
-
-                    $init->{q[attr that we care]} =
-                      [ grep { not m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
-                          @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ];
-
-                }
-
-                # We need know what the source is, sql, ldif, or csv. Now we only have a comeplicated and urgly
-                # solution. You cnanot believe that File::MimeInfo::Magic will use the suffixes of files checked.
-                # Eh, the is_text_file is not good enough for our perpose.
-                if ( is_text_file $source ) {
-                    open my $h, q[<], $source or croak q{Failed to open source file } . $source;
-                    my ( $first_line, @attrs_from_source );
-                    while (<$h>) {
-                        chomp;
-                        next if ( m!^$! or m!^#! );
-                        $first_line = $_;
-                        last;
-                    }
-                    close $h;
-
-                    @attrs_from_source = split $cmd->{operation}->{qq[$mode]}->{separator}->{value}, $first_line;
-
-                    if ( not @attrs_from_source or scalar(@attrs_from_source) <= 1 ) {
-                        $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
-                    }
-                    else {
-                        my %attr_from_source_hash;
-                        for (@attrs_from_source) {
-                            $attr_from_source_hash{qq[$_]} = 1;
-                        }
-
-                        my @result =
-                          grep { not exists $attr_from_source_hash{qq[$_]}; }
-
-                          map {
-                            my $hash_ref = $_;
-                            map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
-                          } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
-
-                        if ( scalar(@result) > 0 ) {
-                            $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
-                        }
-                        else {
-                            $default->{tree2csv}->{init}->{q[source type]} = q{csv};
-                        }
-                    }
-                }
-                else {
-                    if ( ( mimetype($source) ) eq q{text/x-ldif} ) {
-                        $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
-                    }
-                    else {
-                        $default->{tree2csv}->{init}->{q[source type]} = q{sql};
-                    }
-                }
-
-                if ( $default->{tree2csv}->{init}->{q[source type]} eq q{sql} ) {
-                    $default->{shared}->{DBI}->{database} = $cmd->{operation}->{qq[$mode]}->{source}->{value};
-                    my ( $tbl, $sqlite, $dbh, $sth, $db, @row, $sql );
-                    {
-                        $db     = $source;
-                        $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
-                        $dbh    = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 1 } );
-                        $sth    = $dbh->table_info( undef, q{main}, undef, q{table} );
-                        $tbl    = $sth->fetchall_arrayref->[0]->[2];
-                        $sth->finish;
-                    }
-
-                    croak q{Failed to get the table name, pls check.} if ( not defined($tbl) or !$tbl );
-                    $default->{shared}->{DBI}->{q[table name]} = $tbl;
-
-                    # To transfer the init set to the "middle type" so the recursions could be done.
-                    # We only expect that there is one and only one key and value in the following hash ref.
-                    $sql = join q{ }, q{SELECT},
-                      ( join q{, }, values %{ $default->{tree2csv}->{init}->{q[transfer rule]}->[0] } ), q{FROM},
-                      $default->{shared}->{DBI}->{q[table name]}, q{WHERE},
-                      ( join q{, }, keys %{ $default->{tree2csv}->{init}->{q[transfer rule]}->[0] } ), q{IN (},
-                      ( join q{, }, map { qq['$_'] } keys %{ $default->{tree2csv}->{init}->{set}->{origin} } ),
-                      q{)};
-                    $sth = $dbh->prepare($sql) or croak q{Failed to prepare the SQL: } . $sql;
-                    $sth->execute;
-
-                    for ( @{ $sth->fetchall_arrayref } ) {
-                        my $array_ref = $_;
-                        for ( @{$array_ref} ) {
-                            croak q{We do not support the reference types in the init set.}
-                              if ( ref $_ ne q{} );
-                            $default->{tree2csv}->{init}->{set}->{now} = {}
-                              if ( not exists $default->{tree2csv}->{init}->{set}->{now} );
-                            $default->{tree2csv}->{init}->{set}->{now}->{qq[$_]} = 1;
-                        }
-                    }
-
-                    $dbh->disconnect;
-                }
-                elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{ldif} ) {
-                    my ( $ldif, $entry, $lined_values );
-                    my $attr = [
-                        map {
-                            my $hash_ref = $_;
-                            map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
-                        } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
-                    ];
-
-                    $ldif =
-                      Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r", onerror => 'undef' )
-                      or croak q{Failed to create a Net::LDAP::LDIF object.};
-
-                    croak q{Failed to get a LDIF handler.} if ( not defined($ldif) );
-
-                    while ( not $ldif->eof() ) {
-                        my $lined_value = [];
-                        $entry = $ldif->read_entry();
-                        if ( $ldif->error() ) {
-                            verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
-                        }
-                        else {
-                            for ( @{$attr} ) {
-                                my $val = $entry->get_value($_);
-                                croak join q{ }, q{The}, $mode,
-                                  q{work mode only support simple recursion on lined data.}
-                                  if ( ref $val ne q{} );
-                                push @{$lined_value}, $val;
-                            }
-
-                            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) =
-                              @{$lined_value};
-                            if ( exists $default->{tree2csv}->{init}->{set}->{origin}->{qq[$init_attr]} ) {
-                                $default->{tree2csv}->{init}->{set}->{now}->{qq[$init_attr_after_transfer]} = 1;
-                            }
-                        }
-                    }
-                    $ldif->done();
-                }
-                elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
-
-                    my $skip_the_first_line = 1;
-                    my ( $csv, $h, $row, $attr, $val );
-                    $attr = {};
-
-                    push @{$attr_from_cmd_line}, map {
-                        my $hash_ref = $_;
-                        map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
-                    } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
-                    push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
-
-                    $csv = Text::CSV_XS->new(
-                        {
-                            sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
-                            binary      => 1,
-                            quote_char  => q{'},
-                            escape_char => q{\\},
-                        }
-                    ) or croak q{Failed to create Text::CSV_XS object.};
-                    open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
-                      or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
-
-                    while ( $row = $csv->getline($h) ) {
-                        if ($skip_the_first_line) {
-                            $skip_the_first_line = 0;
-                            my $i = 0;
-
-                            # If there repeat attr we will skip it.
-                            for ( @{$row} ) {
-                                $attr->{qq[$_]} = $i
-                                  if ( not exists $attr->{qq[$_]} );
-                                $i++;
-                            }
-                            next;
-                        }
-
-                        my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
-
-                        my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) =
-                          @{$lined_value};
-                        if ( exists $default->{tree2csv}->{init}->{set}->{origin}->{qq[$init_attr]} ) {
-                            $default->{tree2csv}->{init}->{set}->{now}->{qq[$init_attr_after_transfer]} = 1;
-                        }
-
-                    }
-
-                    close $h;
-
-                }
-                else {
-                    croak q{Unkonw source file type. Is it a csv, ldif, or a SQLite3 database?};
-                }
-
-            },
-            q{post audit} => sub {
-                my ( $cmd, $default ) = @_;
-
-                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-                croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
-                croak q{The work mode } . $mode . q{ requires more than one relation.}
-                  if ( $mode eq q{tree2csv}
-                    and scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) <= 1 );
-            },
+            q{post audit} => \&_post_audit_for_tree2csv,
         },
         q{verbose} => { q{help} => q{Output verbosely. No effect now.}, },
         q{verify}  => { q{help} => q{Whether verify LDAP server SSL certificate. Default is not to.}, },
@@ -579,37 +347,11 @@ q{Ouput SQL statements that you can use to create a SQLite3 database. If give a 
         },
         q{csv} => {
             q{help}      => q{Output csv. You can set separator as need.},
-            q{pre audit} => sub {
-                my ( $cmd, $default ) = @_;
-                my $mode = get_enabled_mode( $cmd, $default );
-                $cmd->{operation}->{qq[$mode]}->{separator}->{value} = q{!}
-                  if ( !$cmd->{operation}->{qq[$mode]}->{separator}->{value} );
-            },
+            q{pre audit} => \&_pre_audit_for_csv,
         },
         q{ldif} => {
             q{help}      => q{Output LDIF, LDAP Data Interchange Format, which is text and we can easily read in.},
-            q{pre audit} => sub {
-                my ( $cmd, $default ) = @_;
-                my $modes_to_enable_this = [ q{schema}, ];
-                my $output = [ q{sql}, q{csv}, q{ldif}, ];
-                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-                croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
-                my @find_mode_to_enable_this = grep { $mode eq $_ } @{$modes_to_enable_this};
-
-                # Enable LDIF output format for some mode, f.g., schema.
-                if ( scalar(@find_mode_to_enable_this) ) {
-                    for ( @{$output} ) {
-                        $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} = 0;
-                    }
-                    $cmd->{operation}->{qq[$mode]}->{ldif}->{value} = 1;
-                }
-
-                # Set LDIF output format as the default format if none of output formats is enabled.
-                my @enabled_output_formats =
-                  grep { $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} }
-                  grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} } @{$output};
-                $cmd->{operation}->{qq[$mode]}->{ldif}->{value} = 1 if ( scalar(@enabled_output_formats) == 0 );
-            },
+            q{pre audit} => \&_pre_audit_for_ldif,
         },
         q{output} => {
             q{type} => q{s},
@@ -651,44 +393,7 @@ q{Set a file as data source. The file may be SQLite3 table, csv, or LDIF file. N
             q{type} => q{s},
             q{help} =>
 q{Set LDAP url: schema://server:port, where schema could be one of ldap, ldaps, and ldapi. DO NOT think too much, we only support "ldap" and "ldaps" now. And we DO NOT completely support URLs as the ldapurl(1) does. Perhaps we will support that in the future, while probably we will never do that.},
-            q{post audit} => sub {
-                my ( $cmd, $default ) = @_;
-                my ( $schema, $port, $addr ) = qw(ldap 389);
-                my $lc_schema;
-
-                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-                croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
-
-                my $url = $cmd->{operation}->{qq[$mode]}->{url}->{value};
-                return if ( !$url );
-
-                if ( $url =~ m{\A(?>((?<schema>[^:]+)://)* (?<addr>[^:]+):* ((?<port>\d{1,5}))*)\z}imxs ) {
-                    $schema = $+{schema} if ( exists $+{schema} );
-                    $addr   = $+{addr}   if ( exists $+{addr} );
-                    $port   = $+{port}   if ( exists $+{port} );
-                }
-                croak join q{ }, q{No LDAP server address found in url:}, $url
-                  if ( ( not defined($addr) ) or $addr eq q{} );
-
-                $lc_schema = lc $schema;
-                my @available_schemas = grep { $lc_schema eq $_; } qw( ldap ldaps ldapi );
-                croak join q{ }, $schema, q{is not available schema, please chose one from:},
-                  ( join q{ }, qw( ldap ldaps ldapi ) )
-                  if ( scalar(@available_schemas) != 1 );
-
-                croak join q{ }, $port, q{is not available port} if ( not( $port > 0 ) and ( $port < 65535 ) );
-
-                {
-                    my $res   = Net::DNS::Resolver->new;
-                    my $query = $res->search($addr);
-                    croak join q{ }, q{Can not resolve server name}, qq["$addr"] if ( !$query );
-                }
-
-                $default->{shared}->{LDAP}->{schema} = $schema;
-                $default->{shared}->{LDAP}->{addr}   = $addr;
-                $default->{shared}->{LDAP}->{port}   = $port;
-                $default->{shared}->{LDAP}->{ssl}->{enable} = 1 if ( $schema eq q{ldaps} or lc($schema) eq q{ldaps} );
-            },
+            q{post audit} => \&_post_audit_for_url,
         },
         q{init} => {
             q{type}  => q{s},
@@ -705,17 +410,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
         q{config} => {
             q{help}      => q{Path to config file.},
             q{type}      => q{s},
-            q{pre audit} => sub {
-                my ( $cmd, $default ) = @_;
-                my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-                croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
-                croak join q{ }, q{Config file does not exists or is not readable:},
-                  $cmd->{operation}->{qq[$mode]}->{config}->{value}
-                  if (
-                    not(    -e $cmd->{operation}->{qq[$mode]}->{config}->{value}
-                        and -r $cmd->{operation}->{qq[$mode]}->{config}->{value} )
-                  );
-            },
+            q{pre audit} => \&_pre_audit_for_config,
         },
     },
 
@@ -742,580 +437,17 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
     },
     q{output} => {
         q{collect} => {
-            q{ldif} => sub {
-                my ( $cmd, $default ) = @_;
-                my $mode = q{collect};
-                my $search = get_ldap_from_net( $cmd, $default );
+            q{ldif} => \&_output_ldif_for_collect,
 
-                if ( $cmd->{operation}->{qq[$mode]}->{ldif}->{value} ) {
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{output}->{value}, "w" )
-                          ->write( $search->entries );
-                    }
-                    else {
-                        Net::LDAP::LDIF->new( \*STDOUT, "w" )->write( $search->entries );
-                    }
-                }
+            q{sql} => \&_output_sqlite3_for_collect,
 
-            },
-
-            q{sql} => sub {
-                my ( $cmd, $default ) = @_;
-                my ( $mode, $search, $schema, $objectclasses );
-                my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm,
-                    $prefix_of_insert_tbl_stm );
-                my ( $attr, $attr_from_argument );
-                $mode = q{collect};
-                $search = get_ldap_from_net( $cmd, $default );
-
-                $schema = get_schema_from_net( $cmd, $default );
-
-                my $csv_output;
-
-                if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) > 0 ) {
-                    $objectclasses =
-                      get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{is}->{value} );
-                }
-                elsif ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} } ) > 0 ) {
-                    $objectclasses =
-                      get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{maybe}->{value} );
-                }
-
-                $attr = get_objectclasses_attrs($objectclasses);
-
-                if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) > 0 ) {
-                    $attr_from_argument = {};
-                    for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
-                        $attr_from_argument->{qq[$_]} = 0;
-                    }
-
-                    my @tmp_attrs =
-                      grep { exists $attr_from_argument->{qq[$_]}; }
-                      @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
-
-                    $attr = \@tmp_attrs if ( scalar(@tmp_attrs) > 0 );
-                }
-
-                if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
-                    for ( @{$attr} ) {
-                        $_ =~ y/-/_/s;
-                    }
-                }
-
-                if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
-
-                    if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) > 0 ) {
-                        $tbl = join q{_}, @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} };
-                    }
-                    elsif ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} } ) > 0 ) {
-                        $tbl = join q{_}, @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} };
-                    }
-
-                    $tbl = substr( $tbl, 0, $default->{shared}->{DBI}->{qq[max table name length]} - 1 )
-                      if ( length($tbl) > $default->{shared}->{DBI}->{qq[max table name length]} );
-                    {
-                        local $INPUT_RECORD_SEPARATOR = q{_};
-                        chomp($tbl);
-                    }
-
-                    $create_tbl_stm = join q{ }, q{CREATE TABLE IF NOT EXISTS}, $tbl,
-                      q{(}, ( join q{, }, map { $_ . q[ ] . q[TEXT] } @{$attr} ), q{)};
-                    $drop_tbl_stm             = join q{ }, q{DROP TABLE IF EXISTS}, $tbl;
-                    $prefix_of_insert_tbl_stm = join q{ }, q{INSERT INTO},          $tbl,
-                      q[(], ( join q{, }, map { $_ } @{$attr} ), q[)], q{VALUES};
-
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        $db = $cmd->{operation}->{qq[$mode]}->{output}->{value};
-                    }
-                    else {
-                        $db = ( tempfile( UNLINK => 1, EXLOCK => 0 ) )[1];
-                    }
-
-                    $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
-                    $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 0 } );
-
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        $dbh->do($_) foreach ( ( $drop_tbl_stm, $create_tbl_stm ) );
-                        $dbh->commit;
-                    }
-                    else {
-                        say q{BEGIN;};
-                        say $drop_tbl_stm . q{;};
-                        say $create_tbl_stm . q{;};
-                        say q{COMMIT;};
-                        say q{BEGIN;};
-                    }
-                }
-                elsif ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        open $csv_output, q[>], $cmd->{operation}->{qq[$mode]}->{output}->{value}
-                          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value};
-                        say $csv_output ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$attr} );
-                        close $csv_output;
-                        open $csv_output, q[>>], $cmd->{operation}->{qq[$mode]}->{output}->{value}
-                          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value};
-                    }
-                    else {
-                        say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$attr};
-                    }
-                }
-
-                for ( $search->entries ) {
-                    my $values        = [];
-                    my $general_entry = {};
-                    my $entry         = $_;
-
-                    # Structured data.
-                    for ( @{$attr} ) {
-                        my $entry_attr   = $_;
-                        my @entry_values = qw();
-                        @entry_values = $entry->get_value(qq[$entry_attr]);
-
-                        if ( scalar(@entry_values) == 0 ) {
-                            $general_entry->{qq[$entry_attr]} = {
-                                q{value} => [ q{}, ],
-                                q{count} => 1,
-                            };
-                        }
-                        else {
-                            $general_entry->{qq[$entry_attr]} = {
-                                q{value} => \@entry_values,
-                                q{count} => scalar(@entry_values),
-                            };
-                        }
-                    }
-
-                    # Advanced structured data.
-                    foreach my $entry_attr ( @{$attr} ) {
-                        if ( scalar( @{$values} ) == 0 ) {
-                            for ( @{ $general_entry->{$entry_attr}->{value} } ) { push @{$values}, [ $_, ]; }
-                        }
-                        else {
-                            my $new_array = [];
-                            for ( @{ $general_entry->{$entry_attr}->{value} } ) {
-                                my $val = $_;
-                                for ( @{$values} ) {
-                                    my @new_val_array = ();
-                                    push @new_val_array, @{$_}, $val;
-                                    push @{$new_array}, \@new_val_array;
-                                }
-                            }
-                            $values = $new_array;
-                        }
-
-                    }
-
-                    for ( @{$values} ) {
-                        if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
-                            $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
-                              ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
-                            if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                                $dbh->do($insert_tbl_stm);
-                            }
-                            else {
-                                say $insert_tbl_stm . q{;};
-                            }
-                        }
-                        elsif ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
-                            if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                                say $csv_output ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$_} );
-                            }
-                            else {
-                                say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$_};
-                            }
-                        }
-
-                    }
-
-                }
-
-                if ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
-                    close $csv_output if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} );
-                }
-
-                if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        $dbh->commit;
-                    }
-                    else {
-                        say q{COMMIT;};
-                    }
-                }
-                $dbh->disconnect if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} );
-
-            },
-            q{csv} => sub {
-                my ( $cmd, $default ) = @_;
-                my $mode = get_enabled_mode( $cmd, $default );
-                &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
-            },
+            q{csv} => \&_output_csv_for_collect,
         },
         q{tree2csv} => {
-            q{csv} => sub {
-                my ( $cmd, $default ) = @_;
-                my $mode = q{tree2csv};
-                &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
-            },
-            q{ldif} => sub {
-                my ( $cmd, $default ) = @_;
-                my $mode = q{tree2csv};
-                croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
-            },
-            q{sql} => sub {
+            q{csv}  => \&_output_csv_for_tree2csv,
+            q{ldif} => \&_output_ldif_for_tree2csv,
+            q{sql}  => \&_output_sql_for_tree2csv,
 
-                # We do not simply read all the data into memory because the data may be big.
-                my ( $cmd, $default ) = @_;
-                my $mode = q{tree2csv};
-                my ( $origin_size, $at_last_size ) = qw(0 0);
-                my ( $init_set, $result_set, $processed_init_set );
-
-                $init_set           = $default->{tree2csv}->{init}->{set}->{now};
-                $result_set         = [];
-                $processed_init_set = {};
-
-                if ( $default->{tree2csv}->{init}->{q[source type]} eq q{sql} ) {
-
-                    my ( $tbl, $sqlite, $dbh, $sth, @row, $sql );
-
-                    $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver},
-                      ( join q{=}, q{dbname}, $cmd->{operation}->{qq[$mode]}->{source}->{value} );
-                    $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 1 } );
-
-                    $sql = join q{ }, q{SELECT}, (
-                        join q{, },
-                        (
-                            map {
-                                my $hash_ref = $_;
-                                map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
-                            } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
-                        ),
-                        @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
-                      ),
-                      q{FROM}, $default->{shared}->{DBI}->{q[table name]};
-
-                    $sth = $dbh->prepare($sql);
-
-                    # The init values should be added to the result set, do you think so?
-                    $sth->execute;
-
-                    while ( @row = $sth->fetchrow_array ) {
-                        my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                            @remaider_values )
-                          = @row;
-
-                        next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
-
-                        if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
-                            push @{$result_set}, \@remaider_values;
-                        }
-                    }
-
-                  TREE2CSV_SQL_REDO:
-
-                    $sth->execute;
-
-                    $origin_size = scalar( keys %{$init_set} );
-
-                    while ( @row = $sth->fetchrow_array ) {
-                        my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                            @remaider_values )
-                          = @row;
-
-                        next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
-
-                        if ( exists $init_set->{qq[$rec_attr_after_transfer]}
-                            and not exists $init_set->{qq[$init_attr_after_transfer]} )
-                        {
-                            $init_set->{qq[$init_attr_after_transfer]} = 1;
-                            push @{$result_set}, \@remaider_values;
-                        }
-                    }
-
-                    $at_last_size = scalar( keys %{$init_set} );
-
-                    goto TREE2CSV_SQL_REDO if ( $at_last_size != $origin_size );
-
-                    $dbh->disconnect;
-                }
-                elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{ldif} ) {
-                    my ( $ldif, $entry, $lined_values );
-                    my $attr = [
-                        map { $_ } (
-                            map {
-                                my $hash_ref = $_;
-                                map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
-                            } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
-                        ),
-                        @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
-                    ];
-
-                    # OK. Add the init values to the result set.
-                    $ldif =
-                      Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r",
-                        onerror => 'undef' );
-
-                    while ( not $ldif->eof() ) {
-                        $entry = $ldif->read_entry();
-                        if ( $ldif->error() ) {
-                            verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
-                        }
-                        else {
-
-                            my $lined_value = [];
-                            for ( @{$attr} ) {
-                                my $val = $entry->get_value($_);
-                                croak join q{ }, q{The}, $mode,
-                                  q{work mode only support simple recursion on lined data.}
-                                  if ( ref $val ne q{} );
-                                push @{$lined_value}, $val;
-                            }
-
-                            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                                @remaider_values )
-                              = @{$lined_value};
-
-                            next if ( !$init_attr_after_transfer );
-
-                            if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
-                                push @{$result_set}, \@remaider_values;
-                            }
-                        }
-                    }
-
-                    $ldif->done();
-
-                  TREE2CSV_LDIF_REDO:
-
-                    $ldif =
-                      Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r",
-                        onerror => 'undef' );
-
-                    $origin_size = scalar( keys %{$init_set} );
-
-                    while ( not $ldif->eof() ) {
-                        $entry = $ldif->read_entry();
-                        if ( $ldif->error() ) {
-                            verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
-                        }
-                        else {
-                            my $lined_value = [];
-                            for ( @{$attr} ) {
-                                my $val = $entry->get_value($_);
-                                croak join q{ }, q{The}, $mode,
-                                  q{work mode only support simple recursion on lined data.}
-                                  if ( ref $val ne q{} );
-                                push @{$lined_value}, $val;
-                            }
-
-                            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                                @remaider_values )
-                              = @{$lined_value};
-
-                            next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
-
-                            if ( exists $init_set->{qq[$rec_attr_after_transfer]}
-                                and not exists $init_set->{qq[$init_attr_after_transfer]} )
-                            {
-                                $init_set->{qq[$init_attr_after_transfer]} = 1;
-                                push @{$result_set}, \@remaider_values;
-                            }
-
-                        }
-                    }
-                    $ldif->done();
-
-                    $at_last_size = scalar( keys %{$init_set} );
-                    goto TREE2CSV_LDIF_REDO if ( $origin_size != $at_last_size );
-                }
-                elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
-                    my $skip_the_first_line = 1;
-                    my ( $csv, $h, $row, $attr, $val );
-                    my $attr_from_cmd_line = [];
-                    $attr = {};
-
-                    push @{$attr_from_cmd_line}, map {
-                        my $hash_ref = $_;
-                        map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
-                    } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
-                    push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
-
-                    {
-                        # Add the init set to the result set.
-                        $csv = Text::CSV_XS->new(
-                            {
-                                sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
-                                binary      => 1,
-                                quote_char  => q{'},
-                                escape_char => q{\\},
-                            }
-                        ) or croak q{Failed to create Text::CSV_XS object.};
-                        open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
-                          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
-
-                        while ( $row = $csv->getline($h) ) {
-                            if ($skip_the_first_line) {
-                                $skip_the_first_line = 0;
-                                my $i = 0;
-                                for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
-                                next;
-                            }
-
-                            my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
-
-                            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                                @remaider_values )
-                              = @{$lined_value};
-
-                            next if ( !$init_attr_after_transfer );
-
-                            if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
-                                push @{$result_set}, \@remaider_values;
-                            }
-
-                        }
-
-                        close $h;
-                    }
-
-                  TREE2CSV_CSV_REDO:
-
-                    $skip_the_first_line = 1;
-                    $csv                 = Text::CSV_XS->new(
-                        {
-                            sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
-                            binary      => 1,
-                            quote_char  => q{'},
-                            escape_char => q{\\},
-                        }
-                    ) or croak q{Failed to create Text::CSV_XS object.};
-                    open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
-                      or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
-
-                    $origin_size = scalar( keys %{$init_set} );
-
-                    while ( $row = $csv->getline($h) ) {
-                        if ($skip_the_first_line) {
-                            $skip_the_first_line = 0;
-                            my $i = 0;
-                            for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
-                            next;
-                        }
-
-                        my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
-
-                        my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
-                            @remaider_values )
-                          = @{$lined_value};
-
-                        next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
-
-                        if ( exists $init_set->{qq[$rec_attr_after_transfer]}
-                            and not exists $init_set->{qq[$init_attr_after_transfer]} )
-                        {
-                            $init_set->{qq[$init_attr_after_transfer]} = 1;
-                            push @{$result_set}, \@remaider_values;
-                        }
-
-                    }
-
-                    close $h;
-
-                    $at_last_size = scalar( keys %{$init_set} );
-                    goto TREE2CSV_CSV_REDO if ( $origin_size != $at_last_size );
-                }
-                else {
-                    croak q{Unknown source file type.};
-                }
-
-                if ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        open my $h, q{>}, $cmd->{operation}->{qq[$mode]}->{output}->{value}
-                          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value} . q{.};
-                        say $h (
-                            join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
-                            @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
-                        );
-                        for ( @{$result_set} ) {
-                            say $h ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_} );
-                        }
-                        close $h;
-                    }
-                    else {
-                        say join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
-                          @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} };
-                        for ( @{$result_set} ) {
-                            say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_};
-                        }
-                    }
-
-                }
-                elsif ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
-
-                    my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm,
-                        $prefix_of_insert_tbl_stm );
-
-                    $tbl = join q{_}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
-                    $tbl = substr( $tbl, 0, $default->{shared}->{DBI}->{qq[max table name length]} - 1 )
-                      if ( length($tbl) > $default->{shared}->{DBI}->{qq[max table name length]} );
-                    {
-                        local $INPUT_RECORD_SEPARATOR = q{_};
-                        chomp($tbl);
-                    }
-
-                    $create_tbl_stm = join q{ }, q{CREATE TABLE IF NOT EXISTS}, $tbl, q{(},
-                      (
-                        join q{, },
-                        map { $_ . q[ ] . q[TEXT] } @{ $default->{tree2csv}->{init}->{q[attr that we care]} }
-                      ),
-                      q{)};
-                    $drop_tbl_stm             = join q{ }, q{DROP TABLE IF EXISTS}, $tbl;
-                    $prefix_of_insert_tbl_stm = join q{ }, q{INSERT INTO},          $tbl,
-                      q[(],
-                      ( join q{, }, map { $_ } @{ $default->{tree2csv}->{init}->{q[attr that we care]} } ),
-                      q[)], q{VALUES};
-
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        $db = $cmd->{operation}->{qq[$mode]}->{output}->{value};
-                    }
-                    else {
-                        $db = ( tempfile( UNLINK => 1, EXLOCK => 0 ) )[1];
-                    }
-
-                    $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
-                    $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 0 } );
-
-                    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-                        $dbh->do($_) foreach ( ( $drop_tbl_stm, $create_tbl_stm ) );
-                        $dbh->commit;
-                        for ( @{$result_set} ) {
-                            $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
-                              ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
-                            $dbh->do($insert_tbl_stm);
-                        }
-
-                        $dbh->commit;
-                    }
-                    else {
-                        say q{BEGIN;};
-                        say $drop_tbl_stm . q{;};
-                        say $create_tbl_stm . q{;};
-                        say q{COMMIT;};
-                        say q{BEGIN;};
-                        for ( @{$result_set} ) {
-                            $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
-                              ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
-                            say $insert_tbl_stm;
-                        }
-                        say q{COMMIT;};
-                    }
-
-                    $dbh->disconnect;
-                }
-                else {
-                    croak join q{ }, q{The}, $mode, q{work mode does not support output ldif format.};
-                }
-
-            },
         },
     },
     q{config} => {
@@ -1347,15 +479,10 @@ sub probe {
     my ( $mode, $schema, $all_objectclasses, $objectclasses );
     $mode = q{probe};
 
-    if ( $cmd->{operation}->{qq[$mode]}->{url}->{value} ne q{} ) {
-        $schema = get_schema_from_net( $cmd, $default, );
-    }
-    elsif ( $cmd->{operation}->{qq[$mode]}->{source}->{value} ne q{} ) {
-        $schema = get_schema_from_ldif( $cmd, $default, );
-    }
-    else {
-        croak q{You should give one of --source and --url option};
-    }
+    $schema =
+        $cmd->{operation}->{qq[$mode]}->{url}->{value} ? get_schema_from_net( $cmd, $default )
+      : $cmd->{operation}->{qq[$mode]}->{source}->{value} ? get_schema_from_ldif( $cmd, $default )
+      :   croak join q{}, q{You should give one of --source and --url option}, q{when use work mode}, $mode;
 
     if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) != 0 ) {
         $objectclasses = get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{is}->{value} );
@@ -1367,6 +494,7 @@ sub probe {
             say;
         }
     }
+
 }
 
 sub schema {
@@ -1374,19 +502,11 @@ sub schema {
     my ( $mode, $schema );
     $mode = q{schema};
 
-    if ( $cmd->{operation}->{qq[$mode]}->{url}->{value} ne q{} ) {
-        $schema = get_schema_from_net( $cmd, $default, );
-    }
-    elsif ( $cmd->{operation}->{qq[$mode]}->{source}->{value} ne q{} ) {
-        $schema = get_schema_from_ldif( $cmd, $default, );
-    }
-
-    if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
-        dump_schema_to_ldif( $schema, $cmd->{operation}->{qq[$mode]}->{output}->{value} );
-    }
-    else {
-        dump_schema_to_ldif($schema);
-    }
+    $schema =
+        $cmd->{operation}->{qq[$mode]}->{url}->{value} ? get_schema_from_net( $cmd, $default )
+      : $cmd->{operation}->{qq[$mode]}->{source}->{value} ? get_schema_from_ldif( $cmd, $default )
+      :   croak join q{ }, q{No available url or source found at work mode}, $mode;
+    dump_schema_to_ldif( $schema, $cmd->{operation}->{qq[$mode]}->{output}->{value} );
 }
 
 sub collect {
@@ -1428,9 +548,11 @@ sub construct_objectclasses_tree {
     for ( @{$objectclass} ) {
         my $obj_hash_ref = $_;
         my $obj_name     = $obj_hash_ref->{name};
-        if (   not exists $tree->{qq[$obj_name]}
-            or not $tree->{qq[$obj_name]}->{filled}
-            or !$tree->{qq[$obj_name]}->{filled} )
+        if (
+            not(    exists $tree->{qq[$obj_name]}
+                and $tree->{qq[$obj_name]}->{filled}
+                and $tree->{qq[$obj_name]}->{filled} )
+          )
         {
             $tree->{qq[$obj_name]} = {} if ( not exists $tree->{qq[$obj_name]} );
 
@@ -1444,7 +566,7 @@ sub construct_objectclasses_tree {
             }
 
             $tree->{qq[$obj_name]}->{filled} = 0
-              if ( not exists $tree->{qq[$obj_name]}->{filled} or !exists $tree->{qq[$obj_name]}->{filled} );
+              if ( not( exists $tree->{qq[$obj_name]}->{filled} and exists $tree->{qq[$obj_name]}->{filled} ) );
         }
     }
 
@@ -1452,7 +574,7 @@ sub construct_objectclasses_tree {
         my $obj_hash_ref = $_;
         my $obj_name     = $obj_hash_ref->{name};
 
-        if ( !$tree->{qq[$obj_name]}->{filled} ) {
+        if ( not $tree->{qq[$obj_name]}->{filled} ) {
 
             foreach my $attr_type ( ( q{must}, q{may}, ) ) {
                 if ( exists $obj_hash_ref->{qq[$attr_type]} ) {
@@ -1677,12 +799,7 @@ sub get_ldap_from_net {
 
 sub dump_schema_to_ldif {
     my ( $schema, $file ) = @_;
-    if ($file) {
-        $schema->dump($file);
-    }
-    else {
-        $schema->dump;
-    }
+    $file ? $schema->dump($file) : $schema->dump;
 }
 
 sub get_schema_from_ldif {
@@ -1712,12 +829,7 @@ sub get_schema_from_net {
 }
 
 sub verbose {
-    if ( -t STDIN and -t STDOUT ) {
-        print STDERR color(q{green}), @_, qq[\n], color(q{reset});
-    }
-    else {
-        print @_, qq[\n];
-    }
+    -t STDIN and -t STDOUT ? print STDERR color(q{green}), @_, qq[\n], color(q{reset}) : print @_, qq[\n];
 }
 
 # The worst solution. Can we find a better way?
@@ -2153,4 +1265,882 @@ sub process_options {
     }
 
     return $rc;
+}
+
+sub _pre_audit_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+
+    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    return if ( $mode ne q{tree2csv} );
+    croak join q{ }, q{The work mode}, $mode, q{need the --source option.}
+      if ( !$cmd->{operation}->{qq[$mode]}->{source}->{value} );
+
+    my ( $source, $init, $attr_from_cmd_line );
+
+    $source = $cmd->{operation}->{qq[$mode]}->{source}->{value};
+    $default->{tree2csv}->{init} = {} if ( not exists $default->{tree2csv}->{init} );
+    $init = $default->{tree2csv}->{init};
+
+    # To create init rules and sets for doing recursions.
+    {
+
+        for ( @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } ) {
+            $init->{set}->{origin}->{qq[$_]} = 1;
+        }
+
+        for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
+            next if ( not m{\A[^:]+:[^:]+:[^:]+(?:[^:]+)*\z} );
+            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) = split q[:];
+            if ( not exists $init->{q[transfer rule]} ) {
+                croak q{You should give at least the initial set and the recursion attribute.}
+                  if ( not( defined($init_attr) and $init_attr and defined($rec_attr) and $rec_attr ) );
+                $init->{q[transfer rule]} = [];
+                if ( defined($init_attr_after_transfer) and $init_attr_after_transfer ) {
+                    push @{ $init->{q[transfer rule]} }, { qq[$init_attr] => $init_attr_after_transfer };
+                }
+                else {
+                    push @{ $init->{q[transfer rule]} }, { qq[$init_attr] => $init_attr };
+                }
+                if ( defined($rec_attr_after_transfer) and $rec_attr_after_transfer ) {
+                    push @{ $init->{q[transfer rule]} }, { qq[$rec_attr] => $rec_attr_after_transfer };
+                }
+                else {
+                    push @{ $init->{q[transfer rule]} }, { qq[$rec_attr] => $rec_attr };
+                }
+                $init->{q[recursion attr]} = $rec_attr;
+            }
+            else {
+                croak join qq{\n}, q{More than one recursion relation found:},
+                  ( grep { m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; } @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } );
+            }
+        }
+
+        $init->{q[attr that we care]} =
+          [ grep { not m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; } @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ];
+
+    }
+
+    # We need know what the source is, sql, ldif, or csv. Now we only have a comeplicated and urgly
+    # solution. You cnanot believe that File::MimeInfo::Magic will use the suffixes of files checked.
+    # Eh, the is_text_file is not good enough for our perpose.
+    if ( is_text_file $source ) {
+        open my $h, q[<], $source or croak q{Failed to open source file } . $source;
+        my ( $first_line, @attrs_from_source );
+        while (<$h>) {
+            chomp;
+            next if ( m!^$! or m!^#! );
+            $first_line = $_;
+            last;
+        }
+        close $h;
+
+        @attrs_from_source = split $cmd->{operation}->{qq[$mode]}->{separator}->{value}, $first_line;
+
+        if ( not @attrs_from_source or scalar(@attrs_from_source) <= 1 ) {
+            $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
+        }
+        else {
+            my %attr_from_source_hash;
+            for (@attrs_from_source) {
+                $attr_from_source_hash{qq[$_]} = 1;
+            }
+
+            my @result =
+              grep { not exists $attr_from_source_hash{qq[$_]}; }
+
+              map {
+                my $hash_ref = $_;
+                map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
+              } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
+
+            if ( scalar(@result) > 0 ) {
+                $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
+            }
+            else {
+                $default->{tree2csv}->{init}->{q[source type]} = q{csv};
+            }
+        }
+    }
+    else {
+        if ( ( mimetype($source) ) eq q{text/x-ldif} ) {
+            $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
+        }
+        else {
+            $default->{tree2csv}->{init}->{q[source type]} = q{sql};
+        }
+    }
+
+    if ( $default->{tree2csv}->{init}->{q[source type]} eq q{sql} ) {
+        $default->{shared}->{DBI}->{database} = $cmd->{operation}->{qq[$mode]}->{source}->{value};
+        my ( $tbl, $sqlite, $dbh, $sth, $db, @row, $sql );
+        {
+            $db     = $source;
+            $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
+            $dbh    = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 1 } );
+            $sth    = $dbh->table_info( undef, q{main}, undef, q{table} );
+            $tbl    = $sth->fetchall_arrayref->[0]->[2];
+            $sth->finish;
+        }
+
+        croak q{Failed to get the table name, pls check.} if ( not defined($tbl) or !$tbl );
+        $default->{shared}->{DBI}->{q[table name]} = $tbl;
+
+        # To transfer the init set to the "middle type" so the recursions could be done.
+        # We only expect that there is one and only one key and value in the following hash ref.
+        $sql = join q{ }, q{SELECT},
+          ( join q{, }, values %{ $default->{tree2csv}->{init}->{q[transfer rule]}->[0] } ), q{FROM},
+          $default->{shared}->{DBI}->{q[table name]}, q{WHERE},
+          ( join q{, }, keys %{ $default->{tree2csv}->{init}->{q[transfer rule]}->[0] } ), q{IN (},
+          ( join q{, }, map { qq['$_'] } keys %{ $default->{tree2csv}->{init}->{set}->{origin} } ),
+          q{)};
+        $sth = $dbh->prepare($sql) or croak q{Failed to prepare the SQL: } . $sql;
+        $sth->execute;
+
+        for ( @{ $sth->fetchall_arrayref } ) {
+            my $array_ref = $_;
+            for ( @{$array_ref} ) {
+                croak q{We do not support the reference types in the init set.}
+                  if ( ref $_ ne q{} );
+                $default->{tree2csv}->{init}->{set}->{now} = {}
+                  if ( not exists $default->{tree2csv}->{init}->{set}->{now} );
+                $default->{tree2csv}->{init}->{set}->{now}->{qq[$_]} = 1;
+            }
+        }
+
+        $dbh->disconnect;
+    }
+    elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{ldif} ) {
+        my ( $ldif, $entry, $lined_values );
+        my $attr = [
+            map {
+                my $hash_ref = $_;
+                map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
+            } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
+        ];
+
+        $ldif = Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r", onerror => 'undef' )
+          or croak q{Failed to create a Net::LDAP::LDIF object.};
+
+        croak q{Failed to get a LDIF handler.} if ( not defined($ldif) );
+
+        while ( not $ldif->eof() ) {
+            my $lined_value = [];
+            $entry = $ldif->read_entry();
+            if ( $ldif->error() ) {
+                verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
+            }
+            else {
+                for ( @{$attr} ) {
+                    my $val = $entry->get_value($_);
+                    croak join q{ }, q{The}, $mode, q{work mode only support simple recursion on lined data.}
+                      if ( ref $val ne q{} );
+                    push @{$lined_value}, $val;
+                }
+
+                my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) = @{$lined_value};
+                if ( exists $default->{tree2csv}->{init}->{set}->{origin}->{qq[$init_attr]} ) {
+                    $default->{tree2csv}->{init}->{set}->{now}->{qq[$init_attr_after_transfer]} = 1;
+                }
+            }
+        }
+        $ldif->done();
+    }
+    elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
+
+        my $skip_the_first_line = 1;
+        my ( $csv, $h, $row, $attr, $val );
+        $attr = {};
+
+        push @{$attr_from_cmd_line}, map {
+            my $hash_ref = $_;
+            map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
+        } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
+        push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+
+        $csv = Text::CSV_XS->new(
+            {
+                sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                binary      => 1,
+                quote_char  => q{'},
+                escape_char => q{\\},
+            }
+        ) or croak q{Failed to create Text::CSV_XS object.};
+        open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
+          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
+
+        while ( $row = $csv->getline($h) ) {
+            if ($skip_the_first_line) {
+                $skip_the_first_line = 0;
+                my $i = 0;
+
+                # If there repeat attr we will skip it.
+                for ( @{$row} ) {
+                    $attr->{qq[$_]} = $i
+                      if ( not exists $attr->{qq[$_]} );
+                    $i++;
+                }
+                next;
+            }
+
+            my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
+
+            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) = @{$lined_value};
+            if ( exists $default->{tree2csv}->{init}->{set}->{origin}->{qq[$init_attr]} ) {
+                $default->{tree2csv}->{init}->{set}->{now}->{qq[$init_attr_after_transfer]} = 1;
+            }
+
+        }
+
+        close $h;
+
+    }
+    else {
+        croak q{Unkonw source file type. Is it a csv, ldif, or a SQLite3 database?};
+    }
+
+}
+
+sub _post_audit_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+
+    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    croak q{The work mode } . $mode . q{ requires more than one relation.}
+      if ( $mode eq q{tree2csv}
+        and scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) <= 1 );
+}
+
+sub _output_sqlite3_for_collect {
+    my ( $cmd, $default ) = @_;
+    my ( $mode, $search, $schema, $objectclasses );
+    my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm, $prefix_of_insert_tbl_stm );
+    my ( $attr, $attr_from_argument );
+    $mode = q{collect};
+    $search = get_ldap_from_net( $cmd, $default );
+
+    $schema = get_schema_from_net( $cmd, $default );
+
+    my $csv_output;
+
+    if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) > 0 ) {
+        $objectclasses = get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{is}->{value} );
+    }
+    elsif ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} } ) > 0 ) {
+        $objectclasses =
+          get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{maybe}->{value} );
+    }
+
+    $attr = get_objectclasses_attrs($objectclasses);
+
+    if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) > 0 ) {
+        $attr_from_argument = {};
+        for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
+            $attr_from_argument->{qq[$_]} = 0;
+        }
+
+        my @tmp_attrs =
+          grep { exists $attr_from_argument->{qq[$_]}; } @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
+
+        $attr = \@tmp_attrs if ( scalar(@tmp_attrs) > 0 );
+    }
+
+    if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+        for ( @{$attr} ) {
+            $_ =~ y/-/_/s;
+        }
+    }
+
+    if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+
+        if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) > 0 ) {
+            $tbl = join q{_}, @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} };
+        }
+        elsif ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} } ) > 0 ) {
+            $tbl = join q{_}, @{ $cmd->{operation}->{qq[$mode]}->{maybe}->{value} };
+        }
+
+        $tbl = substr( $tbl, 0, $default->{shared}->{DBI}->{qq[max table name length]} - 1 )
+          if ( length($tbl) > $default->{shared}->{DBI}->{qq[max table name length]} );
+        {
+            local $INPUT_RECORD_SEPARATOR = q{_};
+            chomp($tbl);
+        }
+
+        $create_tbl_stm = join q{ }, q{CREATE TABLE IF NOT EXISTS}, $tbl,
+          q{(}, ( join q{, }, map { $_ . q[ ] . q[TEXT] } @{$attr} ), q{)};
+        $drop_tbl_stm             = join q{ }, q{DROP TABLE IF EXISTS}, $tbl;
+        $prefix_of_insert_tbl_stm = join q{ }, q{INSERT INTO},          $tbl,
+          q[(], ( join q{, }, map { $_ } @{$attr} ), q[)], q{VALUES};
+
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            $db = $cmd->{operation}->{qq[$mode]}->{output}->{value};
+        }
+        else {
+            $db = ( tempfile( UNLINK => 1, EXLOCK => 0 ) )[1];
+        }
+
+        $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
+        $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 0 } );
+
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            $dbh->do($_) foreach ( ( $drop_tbl_stm, $create_tbl_stm ) );
+            $dbh->commit;
+        }
+        else {
+            say q{BEGIN;};
+            say $drop_tbl_stm . q{;};
+            say $create_tbl_stm . q{;};
+            say q{COMMIT;};
+            say q{BEGIN;};
+        }
+    }
+    elsif ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            open $csv_output, q[>], $cmd->{operation}->{qq[$mode]}->{output}->{value}
+              or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value};
+            say $csv_output ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$attr} );
+            close $csv_output;
+            open $csv_output, q[>>], $cmd->{operation}->{qq[$mode]}->{output}->{value}
+              or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value};
+        }
+        else {
+            say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$attr};
+        }
+    }
+
+    for ( $search->entries ) {
+        my $values        = [];
+        my $general_entry = {};
+        my $entry         = $_;
+
+        # Structured data.
+        for ( @{$attr} ) {
+            my $entry_attr   = $_;
+            my @entry_values = qw();
+            @entry_values = $entry->get_value(qq[$entry_attr]);
+
+            if ( scalar(@entry_values) == 0 ) {
+                $general_entry->{qq[$entry_attr]} = {
+                    q{value} => [ q{}, ],
+                    q{count} => 1,
+                };
+            }
+            else {
+                $general_entry->{qq[$entry_attr]} = {
+                    q{value} => \@entry_values,
+                    q{count} => scalar(@entry_values),
+                };
+            }
+        }
+
+        # Advanced structured data.
+        foreach my $entry_attr ( @{$attr} ) {
+            if ( scalar( @{$values} ) == 0 ) {
+                for ( @{ $general_entry->{$entry_attr}->{value} } ) { push @{$values}, [ $_, ]; }
+            }
+            else {
+                my $new_array = [];
+                for ( @{ $general_entry->{$entry_attr}->{value} } ) {
+                    my $val = $_;
+                    for ( @{$values} ) {
+                        my @new_val_array = ();
+                        push @new_val_array, @{$_}, $val;
+                        push @{$new_array}, \@new_val_array;
+                    }
+                }
+                $values = $new_array;
+            }
+
+        }
+
+        for ( @{$values} ) {
+            if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+                $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
+                  ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
+                if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+                    $dbh->do($insert_tbl_stm);
+                }
+                else {
+                    say $insert_tbl_stm . q{;};
+                }
+            }
+            elsif ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
+                if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+                    say $csv_output ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$_} );
+                }
+                else {
+                    say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, @{$_};
+                }
+            }
+
+        }
+
+    }
+
+    if ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
+        close $csv_output if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} );
+    }
+
+    if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            $dbh->commit;
+        }
+        else {
+            say q{COMMIT;};
+        }
+    }
+    $dbh->disconnect if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} );
+
+}
+
+sub _output_sql_for_tree2csv {
+
+    # We do not simply read all the data into memory because the data may be big.
+    my ( $cmd, $default ) = @_;
+    my $mode = q{tree2csv};
+    my ( $origin_size, $at_last_size ) = qw(0 0);
+    my ( $init_set, $result_set, $processed_init_set );
+
+    $init_set           = $default->{tree2csv}->{init}->{set}->{now};
+    $result_set         = [];
+    $processed_init_set = {};
+
+    if ( $default->{tree2csv}->{init}->{q[source type]} eq q{sql} ) {
+
+        my ( $tbl, $sqlite, $dbh, $sth, @row, $sql );
+
+        $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver},
+          ( join q{=}, q{dbname}, $cmd->{operation}->{qq[$mode]}->{source}->{value} );
+        $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 1 } );
+
+        $sql = join q{ }, q{SELECT}, (
+            join q{, },
+            (
+                map {
+                    my $hash_ref = $_;
+                    map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
+                } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
+            ),
+            @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+          ),
+          q{FROM}, $default->{shared}->{DBI}->{q[table name]};
+
+        $sth = $dbh->prepare($sql);
+
+        # The init values should be added to the result set, do you think so?
+        $sth->execute;
+
+        while ( @row = $sth->fetchrow_array ) {
+            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) = @row;
+
+            next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
+
+            if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
+                push @{$result_set}, \@remaider_values;
+            }
+        }
+
+      TREE2CSV_SQL_REDO:
+
+        $sth->execute;
+
+        $origin_size = scalar( keys %{$init_set} );
+
+        while ( @row = $sth->fetchrow_array ) {
+            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) = @row;
+
+            next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
+
+            if ( exists $init_set->{qq[$rec_attr_after_transfer]}
+                and not exists $init_set->{qq[$init_attr_after_transfer]} )
+            {
+                $init_set->{qq[$init_attr_after_transfer]} = 1;
+                push @{$result_set}, \@remaider_values;
+            }
+        }
+
+        $at_last_size = scalar( keys %{$init_set} );
+
+        goto TREE2CSV_SQL_REDO if ( $at_last_size != $origin_size );
+
+        $dbh->disconnect;
+    }
+    elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{ldif} ) {
+        my ( $ldif, $entry, $lined_values );
+        my $attr = [
+            map { $_ } (
+                map {
+                    my $hash_ref = $_;
+                    map { $_ => $hash_ref->{qq[$_]} } keys %{$hash_ref}
+                } @{ $default->{qq[$mode]}->{init}->{q[transfer rule]} }
+            ),
+            @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+        ];
+
+        # OK. Add the init values to the result set.
+        $ldif = Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r", onerror => 'undef' );
+
+        while ( not $ldif->eof() ) {
+            $entry = $ldif->read_entry();
+            if ( $ldif->error() ) {
+                verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
+            }
+            else {
+
+                my $lined_value = [];
+                for ( @{$attr} ) {
+                    my $val = $entry->get_value($_);
+                    croak join q{ }, q{The}, $mode, q{work mode only support simple recursion on lined data.}
+                      if ( ref $val ne q{} );
+                    push @{$lined_value}, $val;
+                }
+
+                my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) =
+                  @{$lined_value};
+
+                next if ( !$init_attr_after_transfer );
+
+                if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
+                    push @{$result_set}, \@remaider_values;
+                }
+            }
+        }
+
+        $ldif->done();
+
+      TREE2CSV_LDIF_REDO:
+
+        $ldif = Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{source}->{value}, "r", onerror => 'undef' );
+
+        $origin_size = scalar( keys %{$init_set} );
+
+        while ( not $ldif->eof() ) {
+            $entry = $ldif->read_entry();
+            if ( $ldif->error() ) {
+                verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
+            }
+            else {
+                my $lined_value = [];
+                for ( @{$attr} ) {
+                    my $val = $entry->get_value($_);
+                    croak join q{ }, q{The}, $mode, q{work mode only support simple recursion on lined data.}
+                      if ( ref $val ne q{} );
+                    push @{$lined_value}, $val;
+                }
+
+                my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) =
+                  @{$lined_value};
+
+                next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
+
+                if ( exists $init_set->{qq[$rec_attr_after_transfer]}
+                    and not exists $init_set->{qq[$init_attr_after_transfer]} )
+                {
+                    $init_set->{qq[$init_attr_after_transfer]} = 1;
+                    push @{$result_set}, \@remaider_values;
+                }
+
+            }
+        }
+        $ldif->done();
+
+        $at_last_size = scalar( keys %{$init_set} );
+        goto TREE2CSV_LDIF_REDO if ( $origin_size != $at_last_size );
+    }
+    elsif ( $default->{tree2csv}->{init}->{q[source type]} eq q{csv} ) {
+        my $skip_the_first_line = 1;
+        my ( $csv, $h, $row, $attr, $val );
+        my $attr_from_cmd_line = [];
+        $attr = {};
+
+        push @{$attr_from_cmd_line}, map {
+            my $hash_ref = $_;
+            map { $_ => $hash_ref->{qq[$_]}; } keys %{$hash_ref};
+        } @{ $default->{tree2csv}->{init}->{q[transfer rule]} };
+        push @{$attr_from_cmd_line}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+
+        {
+            # Add the init set to the result set.
+            $csv = Text::CSV_XS->new(
+                {
+                    sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                    binary      => 1,
+                    quote_char  => q{'},
+                    escape_char => q{\\},
+                }
+            ) or croak q{Failed to create Text::CSV_XS object.};
+            open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
+              or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
+
+            while ( $row = $csv->getline($h) ) {
+                if ($skip_the_first_line) {
+                    $skip_the_first_line = 0;
+                    my $i = 0;
+                    for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
+                    next;
+                }
+
+                my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
+
+                my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) =
+                  @{$lined_value};
+
+                next if ( !$init_attr_after_transfer );
+
+                if ( exists $init_set->{qq[$init_attr_after_transfer]} ) {
+                    push @{$result_set}, \@remaider_values;
+                }
+
+            }
+
+            close $h;
+        }
+
+      TREE2CSV_CSV_REDO:
+
+        $skip_the_first_line = 1;
+        $csv                 = Text::CSV_XS->new(
+            {
+                sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                binary      => 1,
+                quote_char  => q{'},
+                escape_char => q{\\},
+            }
+        ) or croak q{Failed to create Text::CSV_XS object.};
+        open $h, q{<}, $cmd->{operation}->{qq[$mode]}->{source}->{value}
+          or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{source}->{value};
+
+        $origin_size = scalar( keys %{$init_set} );
+
+        while ( $row = $csv->getline($h) ) {
+            if ($skip_the_first_line) {
+                $skip_the_first_line = 0;
+                my $i = 0;
+                for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
+                next;
+            }
+
+            my $lined_value = [ map { $row->[ $attr->{qq[$_]} ]; } @{$attr_from_cmd_line} ];
+
+            my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer, @remaider_values ) =
+              @{$lined_value};
+
+            next if ( !$rec_attr_after_transfer or !$init_attr_after_transfer );
+
+            if ( exists $init_set->{qq[$rec_attr_after_transfer]}
+                and not exists $init_set->{qq[$init_attr_after_transfer]} )
+            {
+                $init_set->{qq[$init_attr_after_transfer]} = 1;
+                push @{$result_set}, \@remaider_values;
+            }
+
+        }
+
+        close $h;
+
+        $at_last_size = scalar( keys %{$init_set} );
+        goto TREE2CSV_CSV_REDO if ( $origin_size != $at_last_size );
+    }
+    else {
+        croak q{Unknown source file type.};
+    }
+
+    if ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            open my $h, q{>}, $cmd->{operation}->{qq[$mode]}->{output}->{value}
+              or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value} . q{.};
+            say $h (
+                join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+            );
+            for ( @{$result_set} ) {
+                say $h ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_} );
+            }
+            close $h;
+        }
+        else {
+            say join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+              @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} };
+            for ( @{$result_set} ) {
+                say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_};
+            }
+        }
+
+    }
+    elsif ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+
+        my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm, $prefix_of_insert_tbl_stm );
+
+        $tbl = join q{_}, @{ $default->{tree2csv}->{init}->{q[attr that we care]} };
+        $tbl = substr( $tbl, 0, $default->{shared}->{DBI}->{qq[max table name length]} - 1 )
+          if ( length($tbl) > $default->{shared}->{DBI}->{qq[max table name length]} );
+        {
+            local $INPUT_RECORD_SEPARATOR = q{_};
+            chomp($tbl);
+        }
+
+        $create_tbl_stm = join q{ }, q{CREATE TABLE IF NOT EXISTS}, $tbl, q{(},
+          ( join q{, }, map { $_ . q[ ] . q[TEXT] } @{ $default->{tree2csv}->{init}->{q[attr that we care]} } ),
+          q{)};
+        $drop_tbl_stm             = join q{ }, q{DROP TABLE IF EXISTS}, $tbl;
+        $prefix_of_insert_tbl_stm = join q{ }, q{INSERT INTO},          $tbl,
+          q[(],
+          ( join q{, }, map { $_ } @{ $default->{tree2csv}->{init}->{q[attr that we care]} } ),
+          q[)], q{VALUES};
+
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            $db = $cmd->{operation}->{qq[$mode]}->{output}->{value};
+        }
+        else {
+            $db = ( tempfile( UNLINK => 1, EXLOCK => 0 ) )[1];
+        }
+
+        $sqlite = join q{:}, q{dbi}, $default->{shared}->{DBI}->{driver}, ( join q{=}, q{dbname}, $db );
+        $dbh = DBI->connect( $sqlite, q{}, q{}, { RaiseError => 1, AutoCommit => 0 } );
+
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            $dbh->do($_) foreach ( ( $drop_tbl_stm, $create_tbl_stm ) );
+            $dbh->commit;
+            for ( @{$result_set} ) {
+                $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
+                  ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
+                $dbh->do($insert_tbl_stm);
+            }
+
+            $dbh->commit;
+        }
+        else {
+            say q{BEGIN;};
+            say $drop_tbl_stm . q{;};
+            say $create_tbl_stm . q{;};
+            say q{COMMIT;};
+            say q{BEGIN;};
+            for ( @{$result_set} ) {
+                $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
+                  ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
+                say $insert_tbl_stm;
+            }
+            say q{COMMIT;};
+        }
+
+        $dbh->disconnect;
+    }
+    else {
+        croak join q{ }, q{The}, $mode, q{work mode does not support output ldif format.};
+    }
+
+}
+
+sub _pre_audit_for_csv {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    $cmd->{operation}->{qq[$mode]}->{separator}->{value} = q{!}
+      if ( !$cmd->{operation}->{qq[$mode]}->{separator}->{value} );
+}
+
+sub _pre_audit_for_ldif {
+    my ( $cmd, $default ) = @_;
+    my $modes_to_enable_this = [ q{schema}, ];
+    my $output = [ q{sql}, q{csv}, q{ldif}, ];
+    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    my @find_mode_to_enable_this = grep { $mode eq $_ } @{$modes_to_enable_this};
+
+    # Enable LDIF output format for some mode, f.g., schema.
+    if ( scalar(@find_mode_to_enable_this) ) {
+        for ( @{$output} ) {
+            $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} = 0;
+        }
+        $cmd->{operation}->{qq[$mode]}->{ldif}->{value} = 1;
+    }
+
+    # Set LDIF output format as the default format if none of output formats is enabled.
+    my @enabled_output_formats =
+      grep { $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} }
+      grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} } @{$output};
+    $cmd->{operation}->{qq[$mode]}->{ldif}->{value} = 1 if ( scalar(@enabled_output_formats) == 0 );
+}
+
+sub _post_audit_for_url {
+    my ( $cmd, $default ) = @_;
+    my ( $schema, $port, $addr ) = qw(ldap 389);
+    my $lc_schema;
+
+    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+
+    my $url = $cmd->{operation}->{qq[$mode]}->{url}->{value};
+    return if ( !$url );
+
+    if ( $url =~ m{\A(?>((?<schema>[^:]+)://)* (?<addr>[^:]+):* ((?<port>\d{1,5}))*)\z}imxs ) {
+        $schema = $+{schema} if ( exists $+{schema} );
+        $addr   = $+{addr}   if ( exists $+{addr} );
+        $port   = $+{port}   if ( exists $+{port} );
+    }
+    croak join q{ }, q{No LDAP server address found in url:}, $url
+      if ( ( not defined($addr) ) or $addr eq q{} );
+
+    $lc_schema = lc $schema;
+    my @available_schemas = grep { $lc_schema eq $_; } qw( ldap ldaps ldapi );
+    croak join q{ }, $schema, q{is not available schema, please chose one from:}, ( join q{ }, qw( ldap ldaps ldapi ) )
+      if ( scalar(@available_schemas) != 1 );
+
+    croak join q{ }, $port, q{is not available port} if ( not( $port > 0 ) and ( $port < 65535 ) );
+
+    {
+        my $res   = Net::DNS::Resolver->new;
+        my $query = $res->search($addr);
+        croak join q{ }, q{Can not resolve server name}, qq["$addr"] if ( !$query );
+    }
+
+    $default->{shared}->{LDAP}->{schema} = $schema;
+    $default->{shared}->{LDAP}->{addr}   = $addr;
+    $default->{shared}->{LDAP}->{port}   = $port;
+    $default->{shared}->{LDAP}->{ssl}->{enable} = 1 if ( $schema eq q{ldaps} or lc($schema) eq q{ldaps} );
+}
+
+sub _pre_audit_for_config {
+    my ( $cmd, $default ) = @_;
+    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    croak join q{ }, q{Config file does not exists or is not readable:},
+      $cmd->{operation}->{qq[$mode]}->{config}->{value}
+      if (
+        not(    -e $cmd->{operation}->{qq[$mode]}->{config}->{value}
+            and -r $cmd->{operation}->{qq[$mode]}->{config}->{value} )
+      );
+}
+
+sub _output_ldif_for_collect {
+    my ( $cmd, $default ) = @_;
+    my $mode = q{collect};
+    my $search = get_ldap_from_net( $cmd, $default );
+
+    if ( $cmd->{operation}->{qq[$mode]}->{ldif}->{value} ) {
+        if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
+            Net::LDAP::LDIF->new( $cmd->{operation}->{qq[$mode]}->{output}->{value}, "w" )->write( $search->entries );
+        }
+        else {
+            Net::LDAP::LDIF->new( \*STDOUT, "w" )->write( $search->entries );
+        }
+    }
+
+}
+
+sub _output_csv_for_collect {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
+}
+
+sub _output_csv_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+    my $mode = q{tree2csv};
+    &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
+}
+
+sub _output_ldif_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+    my $mode = q{tree2csv};
+    croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
 }
