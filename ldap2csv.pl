@@ -1,5 +1,5 @@
 #!/bin/sh
-eval 'perl --version >/dev/null 2>&1 || { echo "No Perl interpreter found";exit 1; }';
+eval 'if ! perl --version >/dev/null 2>&1;then echo "No Perl interpreter found" >&2;exit 1;fi';
 
 #! -*-perl-*-
 eval 'exec perl -x -wS $0 ${1+"$@"}'
@@ -9,6 +9,7 @@ use warnings;
 use strict;
 use feature qw(say);
 use English qw( -no_match_vars );
+use Fatal qw( :void open close );
 
 my $nerd_name  = q{xning};
 my $nerd_email = q{anzhou94@gmail.com};
@@ -44,9 +45,13 @@ sub enable_ssl_for_ldap;
 #####################################################################
 # If we import some modules at runtime, we have a chance to do more.#
 # Just as you see, it's some complicated.                           #
+# Once a "BEGIN" has run, it is immediately undefined and any code  #
+# it used is returned to Perl's memory pool.                        #
+# You can just skip the following long and urgly codes, just think  #
+# they are something like 'use mod'.
 #####################################################################
 BEGIN {
-    my $version = q{0.1.3};
+    my $version = q{0.1.4};
 
     # When in production environment, we should disable this env var. So we
     # will use our version croak func that does not give stack infos.
@@ -82,14 +87,16 @@ BEGIN {
             },
             q{require} => [ q{DBD::SQLite}, ],
         },
-        q{File::Temp} => { q{import} => 'use File::Temp qw(tempfile)', },
-        q{Data::Dump} => { q{import} => 'use Data::Dump qw(dump)', },
+        q{File::Temp}      => { q{import} => 'use File::Temp qw(tempfile)', },
+        q{Data::Dump}      => { q{import} => 'use Data::Dump qw(dump)', },
+        q{List::MoreUtils} => { q{import} => 'use List::MoreUtils qw(any)', },
     };
 
-    map { $mod_need->{qq[$_]} = {}; }
-      grep { not exists $mod_need->{qq[$_]}; } @{$simple_mods};
+    for my $mod ( @{$simple_mods} ) {
+        $mod_need->{qq[$mod]} = {} if not exists $mod_need->{qq[$mod]};
+    }
 
-    if ( grep { $_ eq q{list-packages} } @ARGV ) {
+    if ( $ARGV[0] and q{list-packages} eq $ARGV[0] ) {
         say join qq{\n}, q{Need following Perl modules:}, map { q[ ] x 4 . $_ } (
             keys %{$mod_need},
             map { @{ $mod_need->{qq[$_]}->{require} } }
@@ -103,7 +110,8 @@ BEGIN {
     # try our best to do something that we can do.
     # If want to use moduels availabe infos, the following hash, $mod_need, could be used.
     # We will export this hash by function mod_available_status.
-    map {
+
+    for ( keys %{$mod_need} ) {
         my $mod = $_;
         exists $mod_need->{qq[$mod]}->{import} ? eval qq[$mod_need->{qq[$mod]}->{import}] : eval qq{use $mod};
         if ($@) {
@@ -113,20 +121,20 @@ BEGIN {
             $mod_need->{qq[$mod]}->{available} =
               exists $mod_need->{qq[$mod]}->{check} ? &{ $mod_need->{qq[$mod]}->{check} } : 1;
         }
-    } ( keys %{$mod_need} );
+    }
 
     # def is_mod_*_available functions
-    map {
+    for ( keys %{$mod_need} ) {
         my $mod                = $_;
         my $mod_name_canonical = lc($mod);
         $mod_name_canonical =~ y/:/_/s;
         my $sub_name = join q{_}, q{is_mod}, $mod_name_canonical, q{available};
         eval join q[ ], qq[sub], $sub_name,
           ( join qq[\n], q[{], q[ ] x 4 . q[return] . q[ ] . $mod_need->{qq[$mod]}->{available} . q[;], q[}] );
-    } ( keys %{$mod_need} );
+    }
 
     my $mod_status = [];
-    map {
+    for ( keys %{$mod_need} ) {
         my ( $mod_str, $mod_available_str, $mod_import_str ) = qw();
         $mod_available_str = join q{ => }, q[q{available}], $mod_need->{qq[$_]}->{available};
         if ( exists $mod_need->{qq[$_]}->{import} ) {
@@ -138,7 +146,7 @@ BEGIN {
         }
         $mod_str = join q{ => }, q[q{] . qq[$_] . q[}], ( join q{ }, q[{], $mod_str, q[}] );
         push @{$mod_status}, $mod_str;
-    } ( keys %{$mod_need} );
+    }
 
     # def mod_available_status function
     my $mod_status_str = join q{, }, @{$mod_status};
@@ -167,7 +175,7 @@ BEGIN {
             print STDERR qq{\n\n};
             print STDERR q{Pls use your system package management tool to install them. F.g.,} . qq{\n};
             print STDERR q{if you system is RHEL-like, you can use yum(8).} . qq{\n};
-            print q{And perhaps, you need configure EPEL repo.} . qq{\n};
+            print STDERR q{And perhaps, you need configure EPEL repo.} . qq{\n};
             print STDERR q{For EPEL, pls reference https://fedoraproject.org/wiki/EPEL.} . qq{\n};
             print STDERR q{Or you can try cpan command: https://metacpan.org/pod/CPAN.} . qq{\n};
             print STDERR qq{\n};
@@ -215,6 +223,11 @@ binmode STDOUT, q[:utf8];
 binmode STDIN,  q[:utf8];
 binmode STDERR, q[:utf8];
 
+# OK, get here, importing modules are done. Sure, tell the turth, there're
+# something are done as nomoral codes, while you can think all the above
+# code, we expect they will be run before the following codes. So, it seems
+# you can not use BEGIN block again.
+
 ###################################################################################
 # Now we only check the options that accept a simple value as their parameters,   #
 # f.g., string, integer, and boolean, reference, etc.                             #
@@ -247,7 +260,7 @@ my $default = {
         q{default} => {
             q{work mode}           => q{probe},
             q{private config file} => getcwd . q{.ldap2csv.ini},
-            q{global config file}  => $ENV{HOME} =~ m!/\z!mxs
+            q{global config file}  => $ENV{HOME} =~ m{/\z}mxs
             ? $ENV{HOME} . q{.ldap2csv.ini}
             : $ENV{HOME} . q{/} . q{.ldap2csv.ini},
             q{system config file} => q{/etc/ldap2csv.ini},
@@ -322,9 +335,12 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                 # To create init rules and sets for doing recursions.
                 {
 
-                    map { $init->{set}->{origin}->{qq[$_]} = 1; } @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} };
+                    for ( @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } ) {
+                        $init->{set}->{origin}->{qq[$_]} = 1;
+                    }
 
-                    map {
+                    for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
+                        next if ( not m{\A[^:]+:[^:]+:[^:]+(?:[^:]+)*\z} );
                         my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) = split q[:];
                         if ( not exists $init->{q[transfer rule]} ) {
                             croak q{You should give at least the initial set and the recursion attribute.}
@@ -349,11 +365,9 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                               ( grep { m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
                                   @{ $cmd->{operation}->{qq[$mode]}->{init}->{value} } );
                         }
-                      }
-                      grep { m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
-                      @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
+                    }
 
-                    $init->{q[attr that we care]}->{qq[$_]} =
+                    $init->{q[attr that we care]} =
                       [ grep { not m!^[^:]+:[^:]+:[^:]+(?:[^:]+)*!; }
                           @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ];
 
@@ -380,7 +394,9 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                     }
                     else {
                         my %attr_from_source_hash;
-                        map { $attr_from_source_hash{qq[$_]} = 1; } @attrs_from_source;
+                        for (@attrs_from_source) {
+                            $attr_from_source_hash{qq[$_]} = 1;
+                        }
 
                         my @result =
                           grep { not exists $attr_from_source_hash{qq[$_]}; }
@@ -432,15 +448,17 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                       q{)};
                     $sth = $dbh->prepare($sql) or croak q{Failed to prepare the SQL: } . $sql;
                     $sth->execute;
-                    map {
-                        map {
+
+                    for ( @{ $sth->fetchall_arrayref } ) {
+                        my $array_ref = $_;
+                        for ( @{$array_ref} ) {
                             croak q{We do not support the reference types in the init set.}
                               if ( ref $_ ne q{} );
                             $default->{tree2csv}->{init}->{set}->{now} = {}
                               if ( not exists $default->{tree2csv}->{init}->{set}->{now} );
                             $default->{tree2csv}->{init}->{set}->{now}->{qq[$_]} = 1;
-                          } @{$_}
-                    } @{ $sth->fetchall_arrayref };
+                        }
+                    }
 
                     $dbh->disconnect;
                 }
@@ -466,13 +484,13 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                             verbose "Error msg:\n", $ldif->error(), qq{\n}, "Error lines:\n", $ldif->error_lines();
                         }
                         else {
-                            map {
+                            for ( @{$attr} ) {
                                 my $val = $entry->get_value($_);
                                 croak join q{ }, q{The}, $mode,
                                   q{work mode only support simple recursion on lined data.}
                                   if ( ref $val ne q{} );
                                 push @{$lined_value}, $val;
-                            } @{$attr};
+                            }
 
                             my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer ) =
                               @{$lined_value};
@@ -510,7 +528,13 @@ q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do mor
                         if ($skip_the_first_line) {
                             $skip_the_first_line = 0;
                             my $i = 0;
-                            map { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; } @{$row};
+
+                            # If there repeat attr we will skip it.
+                            for ( @{$row} ) {
+                                $attr->{qq[$_]} = $i
+                                  if ( not exists $attr->{qq[$_]} );
+                                $i++;
+                            }
                             next;
                         }
 
@@ -574,7 +598,9 @@ q{Ouput SQL statements that you can use to create a SQLite3 database. If give a 
 
                 # Enable LDIF output format for some mode, f.g., schema.
                 if ( scalar(@find_mode_to_enable_this) ) {
-                    map { $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} = 0; } @{$output};
+                    for ( @{$output} ) {
+                        $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} = 0;
+                    }
                     $cmd->{operation}->{qq[$mode]}->{ldif}->{value} = 1;
                 }
 
@@ -636,7 +662,7 @@ q{Set LDAP url: schema://server:port, where schema could be one of ldap, ldaps, 
                 my $url = $cmd->{operation}->{qq[$mode]}->{url}->{value};
                 return if ( !$url );
 
-                if ( $url =~ m!^((?<schema>[^:]+)://)* (?<addr>[^:]+):* ((?<port>\d{1,5}))*!imx ) {
+                if ( $url =~ m{\A(?>((?<schema>[^:]+)://)* (?<addr>[^:]+):* ((?<port>\d{1,5}))*)\z}imxs ) {
                     $schema = $+{schema} if ( exists $+{schema} );
                     $addr   = $+{addr}   if ( exists $+{addr} );
                     $port   = $+{port}   if ( exists $+{port} );
@@ -759,7 +785,9 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
 
                 if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) > 0 ) {
                     $attr_from_argument = {};
-                    map { $attr_from_argument->{qq[$_]} = 0; } @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} };
+                    for ( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) {
+                        $attr_from_argument->{qq[$_]} = 0;
+                    }
 
                     my @tmp_attrs =
                       grep { exists $attr_from_argument->{qq[$_]}; }
@@ -768,7 +796,11 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                     $attr = \@tmp_attrs if ( scalar(@tmp_attrs) > 0 );
                 }
 
-                map { $_ =~ y/-/_/s; } @{$attr} if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} );
+                if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
+                    for ( @{$attr} ) {
+                        $_ =~ y/-/_/s;
+                    }
+                }
 
                 if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
 
@@ -828,13 +860,13 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                     }
                 }
 
-                map {
+                for ( $search->entries ) {
                     my $values        = [];
                     my $general_entry = {};
                     my $entry         = $_;
 
                     # Structured data.
-                    map {
+                    for ( @{$attr} ) {
                         my $entry_attr   = $_;
                         my @entry_values = qw();
                         @entry_values = $entry->get_value(qq[$entry_attr]);
@@ -851,32 +883,30 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                                 q{count} => scalar(@entry_values),
                             };
                         }
-                    } @{$attr};
+                    }
 
                     # Advanced structured data.
                     foreach my $entry_attr ( @{$attr} ) {
                         if ( scalar( @{$values} ) == 0 ) {
-                            map { push @{$values}, [ $_, ]; } @{ $general_entry->{$entry_attr}->{value} };
+                            for ( @{ $general_entry->{$entry_attr}->{value} } ) { push @{$values}, [ $_, ]; }
                         }
                         else {
                             my $new_array = [];
-                            map {
+                            for ( @{ $general_entry->{$entry_attr}->{value} } ) {
                                 my $val = $_;
-                                map {
+                                for ( @{$values} ) {
                                     my @new_val_array = ();
                                     push @new_val_array, @{$_}, $val;
                                     push @{$new_array}, \@new_val_array;
-                                } @{$values};
-
-                            } @{ $general_entry->{$entry_attr}->{value} };
+                                }
+                            }
                             $values = $new_array;
                         }
 
                     }
 
-                    map {
-                        if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} )
-                        {
+                    for ( @{$values} ) {
+                        if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} ) {
                             $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
                               ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
                             if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
@@ -895,9 +925,9 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                             }
                         }
 
-                    } @{$values};
+                    }
 
-                } $search->entries;
+                }
 
                 if ( $cmd->{operation}->{qq[$mode]}->{csv}->{value} ) {
                     close $csv_output if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} );
@@ -1032,13 +1062,13 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                         else {
 
                             my $lined_value = [];
-                            map {
+                            for ( @{$attr} ) {
                                 my $val = $entry->get_value($_);
                                 croak join q{ }, q{The}, $mode,
                                   q{work mode only support simple recursion on lined data.}
                                   if ( ref $val ne q{} );
                                 push @{$lined_value}, $val;
-                            } @{$attr};
+                            }
 
                             my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
                                 @remaider_values )
@@ -1069,13 +1099,13 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                         }
                         else {
                             my $lined_value = [];
-                            map {
+                            for ( @{$attr} ) {
                                 my $val = $entry->get_value($_);
                                 croak join q{ }, q{The}, $mode,
                                   q{work mode only support simple recursion on lined data.}
                                   if ( ref $val ne q{} );
                                 push @{$lined_value}, $val;
-                            } @{$attr};
+                            }
 
                             my ( $init_attr, $init_attr_after_transfer, $rec_attr, $rec_attr_after_transfer,
                                 @remaider_values )
@@ -1126,7 +1156,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                             if ($skip_the_first_line) {
                                 $skip_the_first_line = 0;
                                 my $i = 0;
-                                map { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; } @{$row};
+                                for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
                                 next;
                             }
 
@@ -1149,7 +1179,8 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
 
                   TREE2CSV_CSV_REDO:
 
-                    $csv = Text::CSV_XS->new(
+                    $skip_the_first_line = 1;
+                    $csv                 = Text::CSV_XS->new(
                         {
                             sep_char    => $cmd->{operation}->{qq[$mode]}->{separator}->{value},
                             binary      => 1,
@@ -1166,7 +1197,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                         if ($skip_the_first_line) {
                             $skip_the_first_line = 0;
                             my $i = 0;
-                            map { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; } @{$row};
+                            for ( @{$row} ) { $attr->{qq[$_]} = $i if ( not exists $attr->{qq[$_]} ); $i++; }
                             next;
                         }
 
@@ -1200,15 +1231,21 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                     if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
                         open my $h, q{>}, $cmd->{operation}->{qq[$mode]}->{output}->{value}
                           or croak q{Failed to open file } . $cmd->{operation}->{qq[$mode]}->{output}->{value} . q{.};
-                        map {
+                        say $h (
+                            join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                            @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} }
+                        );
+                        for ( @{$result_set} ) {
                             say $h ( join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_} );
-                        } @{$result_set};
+                        }
                         close $h;
                     }
                     else {
-                        map {
+                        say join $cmd->{operation}->{qq[$mode]}->{separator}->{value},
+                          @{ $default->{qq[$mode]}->{init}->{q[attr that we care]} };
+                        for ( @{$result_set} ) {
                             say join $cmd->{operation}->{qq[$mode]}->{separator}->{value}, map { $_ } @{$_};
-                        } @{$result_set};
+                        }
                     }
 
                 }
@@ -1250,11 +1287,11 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                     if ( $cmd->{operation}->{qq[$mode]}->{output}->{value} ne q{} ) {
                         $dbh->do($_) foreach ( ( $drop_tbl_stm, $create_tbl_stm ) );
                         $dbh->commit;
-                        map {
+                        for ( @{$result_set} ) {
                             $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
                               ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
                             $dbh->do($insert_tbl_stm);
-                        } @{$result_set};
+                        }
 
                         $dbh->commit;
                     }
@@ -1264,11 +1301,11 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
                         say $create_tbl_stm . q{;};
                         say q{COMMIT;};
                         say q{BEGIN;};
-                        map {
+                        for ( @{$result_set} ) {
                             $insert_tbl_stm = join q{ }, $prefix_of_insert_tbl_stm, join q{ }, q[(],
                               ( join q{, }, map { $dbh->quote($_) } @{$_} ), q[)] . q{;};
                             say $insert_tbl_stm;
-                        } @{$result_set};
+                        }
                         say q{COMMIT;};
                     }
 
@@ -1322,13 +1359,13 @@ sub probe {
 
     if ( scalar( @{ $cmd->{operation}->{qq[$mode]}->{is}->{value} } ) != 0 ) {
         $objectclasses = get_objectclasses_details_by_names( $schema, $cmd->{operation}->{qq[$mode]}->{is}->{value} );
-        map { say dump($_); } @{$objectclasses};
+        for ( @{$objectclasses} ) { say dump($_); }
     }
     else {
         $all_objectclasses = get_all_objectclasses($schema);
-        map        { say; }
-          sort map { $_->{name}; } @{$all_objectclasses};
-
+        for ( sort map { $_->{name}; } @{$all_objectclasses} ) {
+            say;
+        }
     }
 }
 
@@ -1388,7 +1425,7 @@ sub construct_objectclasses_tree {
     my $objectclass = [ $schema->all_objectclasses() ];
     my $tree        = {};
 
-    map {
+    for ( @{$objectclass} ) {
         my $obj_hash_ref = $_;
         my $obj_name     = $obj_hash_ref->{name};
         if (   not exists $tree->{qq[$obj_name]}
@@ -1397,20 +1434,21 @@ sub construct_objectclasses_tree {
         {
             $tree->{qq[$obj_name]} = {} if ( not exists $tree->{qq[$obj_name]} );
 
-            map { $tree->{qq[$obj_name]}->{qq[$_]} = {} if ( not exists $tree->{qq[$obj_name]}->{qq[$_]} ); }
-              qw(type parent child);
+            for (qw(type parent child)) {
+                $tree->{qq[$obj_name]}->{qq[$_]} = {} if ( not exists $tree->{qq[$obj_name]}->{qq[$_]} );
+            }
 
-            map {
+            for (qw(must may)) {
                 $tree->{qq[$obj_name]}->{type}->{qq[$_]} = {}
                   if ( not exists $tree->{qq[$obj_name]}->{type}->{qq[$_]} );
-            } qw(must may);
+            }
 
             $tree->{qq[$obj_name]}->{filled} = 0
               if ( not exists $tree->{qq[$obj_name]}->{filled} or !exists $tree->{qq[$obj_name]}->{filled} );
         }
-    } @{$objectclass};
+    }
 
-    map {
+    for ( @{$objectclass} ) {
         my $obj_hash_ref = $_;
         my $obj_name     = $obj_hash_ref->{name};
 
@@ -1418,25 +1456,27 @@ sub construct_objectclasses_tree {
 
             foreach my $attr_type ( ( q{must}, q{may}, ) ) {
                 if ( exists $obj_hash_ref->{qq[$attr_type]} ) {
-                    map { $tree->{qq[$obj_name]}->{type}->{qq[$attr_type]}->{qq[$_]} = 1; }
-                      grep { not exists $tree->{qq[$obj_name]}->{type}->{qq[$attr_type]}->{qq[$_]}; }
-                      @{ $obj_hash_ref->{qq[$attr_type]} };
+                    for ( grep { not exists $tree->{qq[$obj_name]}->{type}->{qq[$attr_type]}->{qq[$_]}; }
+                        @{ $obj_hash_ref->{qq[$attr_type]} } )
+                    {
+                        $tree->{qq[$obj_name]}->{type}->{qq[$attr_type]}->{qq[$_]} = 1;
+                    }
                 }
             }
 
             if ( exists $obj_hash_ref->{q[sup]} ) {
-                map {
+                for ( @{ $obj_hash_ref->{q[sup]} } ) {
                     my $parent = $_;
                     croak q{Parent object class not found: } . $parent if ( not exists $tree->{qq[$parent]} );
                     $tree->{qq[$obj_name]}->{parent}->{qq[$parent]} = 1
                       if ( not exists $tree->{qq[$obj_name]}->{parent}->{qq[$parent]} );
                     $tree->{qq[$parent]}->{child}->{qq[$obj_name]} = 1
                       if ( not exists $tree->{qq[$parent]}->{child}->{qq[$obj_name]} );
-                } @{ $obj_hash_ref->{q[sup]} };
+                }
             }
             $tree->{qq[$obj_name]}->{filled} = 1;
         }
-    } @{$objectclass};
+    }
 
     return %{$tree} if (wantarray);
     return $tree if ( not wantarray );
@@ -1455,21 +1495,25 @@ sub get_objectclasses_attrs {
     croak q{Expect an array reference.} if ( ( ref $objectclasses ) ne ( ref [] ) );
     my $attr = {};
 
-    map {
+    for ( @{$objectclasses} ) {
         my $object_hash_ref = $_;
         if ( exists $object_hash_ref->{must} and exists $object_hash_ref->{may} ) {
-            map { $attr->{qq[$_]} = 1; }
-              grep { not exists $attr->{qq[$_]}; } ( @{ $object_hash_ref->{must} }, @{ $object_hash_ref->{may} } );
+            for ( grep { not exists $attr->{qq[$_]}; } ( @{ $object_hash_ref->{must} }, @{ $object_hash_ref->{may} } ) )
+            {
+                $attr->{qq[$_]} = 1;
+            }
         }
         elsif ( exists $object_hash_ref->{must} ) {
-            map { $attr->{qq[$_]} = 1; }
-              grep { not exists $attr->{qq[$_]}; } @{ $object_hash_ref->{must} };
+            for ( grep { not exists $attr->{qq[$_]}; } @{ $object_hash_ref->{must} } ) {
+                $attr->{qq[$_]} = 1;
+            }
         }
         elsif ( exists $object_hash_ref->{may} ) {
-            map { $attr->{qq[$_]} = 1; }
-              grep { not exists $attr->{qq[$_]}; } @{ $object_hash_ref->{may} };
+            for ( grep { not exists $attr->{qq[$_]}; } @{ $object_hash_ref->{may} } ) {
+                $attr->{qq[$_]} = 1;
+            }
         }
-    } @{$objectclasses};
+    }
 
     delete $attr->{objectClass} if ( exists $attr->{objectClass} );
 
@@ -1489,7 +1533,7 @@ sub get_objectclasses_details_by_names {
         croak q{Argument should be an array reference or a classobject name.};
     }
 
-    map { $queries->{qq[$_]} = 1; } @{$query};
+    for ( @{$query} ) { $queries->{qq[$_]} = 1; }
 
     @objectclasses = grep {
         my $array_item_for_objectclass = $_;
@@ -1687,7 +1731,7 @@ sub is_text_file {
     close $h;
     $text_magic = mimetype($t);
     $magic      = mimetype($file);
-    return 1 if ( $magic =~ m!^text/! );
+    return 1 if ( $magic =~ m{\Atext/} );
     return $text_magic eq $magic;
 }
 
@@ -1705,24 +1749,18 @@ sub usage {
 
     $max = $max < ( $wchar / 8 ) ? $wchar / 8 : 10;
 
-    map {
+    for ( keys %{ $cmd->{operation} } ) {
         my $mode_or_share = $_;
         map { $option_max_len = $option_max_len < length(qq{$_}) ? length(qq{$_}) : $option_max_len; }
           keys %{ $cmd->{operation}->{qq[$mode_or_share]} };
-    } keys %{ $cmd->{operation} };
+    }
 
     $option_placeholder = length(q{--}) + $option_max_len + length(q{ });
 
     $Text::Wrap::columns = $wchar;
 
     say q{USAGE:};
-    map {
-        say wrap(
-            q{ } x ${tab},
-            q{ } x ( length( $default->{program}->{name} ) + $tab + 1 ),
-            $default->{program}->{name}, $_
-        );
-      } (
+    for (
         join( q{ }, q{--help}, ),
         join( q{ }, q{--probe},  q{--url url},     q{[--is who]} ),
         join( q{ }, q{--probe},  q{--source ldif}, q{[--is who]} ),
@@ -1745,7 +1783,14 @@ sub usage {
             q{--reliation relation},
             q{[--output file]},
             q{[--separator separator]} ),
-      );
+      )
+    {
+        say wrap(
+            q{ } x ${tab},
+            q{ } x ( length( $default->{program}->{name} ) + $tab + 1 ),
+            $default->{program}->{name}, $_
+        );
+    }
     print qq{\n};
 
     say wrap(
@@ -1755,40 +1800,40 @@ sub usage {
         q{You can chose one of the modes by following options:}
     );
 
-    map {
+    for ( sort keys %{ $cmd->{operation}->{mode} } ) {
         say wrap (
             q{},
             q{ } x ( $option_placeholder + $tab ),
             q{--} . $_ . q{ } x ( $option_placeholder - length($_) ),
             $cmd->{operation}->{mode}->{$_}->{help}
         );
-    } sort keys %{ $cmd->{operation}->{mode} };
+    }
     print "\n";
 
     say q{These modes share follwing options:};
-    map {
+    for ( sort keys %{ $cmd->{operation}->{shared} } ) {
         say wrap (
             q{},
             q{ } x ( $option_placeholder + $tab ),
             q{--} . $_ . q{ } x ( $option_placeholder - length($_) ),
             $cmd->{operation}->{shared}->{$_}->{help}
-          )
-    } sort keys %{ $cmd->{operation}->{shared} };
+        );
+    }
     print "\n";
 
-    map {
+    for ( sort keys %{ $cmd->{operation}->{mode} } ) {
         my $mode = $_;
         say join q{ }, q{The}, $mode, q{mode support follwing options:};
-        map {
+        for ( sort keys %{ $cmd->{operation}->{qq[$mode]} } ) {
             say wrap (
                 q{},
                 q{ } x ( $option_placeholder + $tab ),
                 q{--} . $_ . q{ } x ( $option_placeholder - length($_) ),
                 $cmd->{operation}->{qq[$mode]}->{$_}->{help}
-              )
-        } sort keys %{ $cmd->{operation}->{qq[$mode]} };
+            );
+        }
         print "\n";
-    } sort keys %{ $cmd->{operation}->{mode} };
+    }
 
     exit(0);
 }
@@ -1798,7 +1843,7 @@ sub usage {
 # KEEP IT SIMPLE, STUPID.
 sub AUTOLOAD {
     no strict;
-    if ( $AUTOLOAD =~ /^main::is_mod_.*_available$/ or $AUTOLOAD =~ /^main::mod_available_status$/ ) {
+    if ( $AUTOLOAD =~ m{\Amain::is_mod_.*_available\z}mxs or $AUTOLOAD =~ m{\Amain::mod_available_status\z}mxs ) {
         return &$AUTOLOAD;
     }
     croak "Undefined subroutine &$AUTOLOAD called";
@@ -1818,10 +1863,14 @@ sub import_mod_needed {
     croak q{Arguments should be: hash reference.}
       if ( ( ref $mods ) ne ( ref {} ) );
 
-    map {
-        my $mod = $_;
-        eval exists $mods->{qq[$mod]}->{import} ? $mods->{qq[$mod]}->{import} : qq{use $mod};
-    } keys %{$mods};
+    for ( keys %{$mods} ) {
+        if ( exists $mods->{qq[$_]}->{import} ) {
+            eval $mods->{qq[$_]}->{import};
+        }
+        else {
+            eval qq{use $_};
+        }
+    }
 }
 
 sub process_config_file {
@@ -1831,15 +1880,15 @@ sub process_config_file {
 sub init_options {
     my ( $cmd, $default ) = @_;
 
-    map {
+    for ( keys %{ $cmd->{operation} } ) {
         my $shared_or_mode_name = $_;
-        map {
+        for ( @{ $cmd->{operation}->{qq[$shared_or_mode_name]}->{options} } ) {
             croak join {}, q{No option item found for}, q{--} . $_, q{of}, $shared_or_mode_name
               if ( not exists $cmd->{options}->{qq[$_]} );
             $cmd->{operation}->{qq[$shared_or_mode_name]}->{$_} = $cmd->{options}->{qq[$_]};
-        } @{ $cmd->{operation}->{qq[$shared_or_mode_name]}->{options} };
+        }
         delete $cmd->{operation}->{qq[$shared_or_mode_name]}->{options};
-    } keys %{ $cmd->{operation} };
+    }
     delete $cmd->{options};
 
     my $init_val = {
@@ -1848,9 +1897,9 @@ sub init_options {
         q{i}  => 0,
         q{s%} => {},
     };
-    map {
+    for ( values %{ $cmd->{operation} } ) {
         my $opts = $_;
-        map {
+        for ( grep { exists $opts->{qq{$_}}->{value} ? 0 : 1; } keys %{$opts} ) {
             $opts->{qq{$_}}->{type} = q{!} if ( not exists $opts->{qq{$_}}->{type} );
             if ( not exists $opts->{qq{$_}}->{value} ) {
                 $opts->{qq{$_}}->{value} =
@@ -1858,9 +1907,8 @@ sub init_options {
                 croak join q{: }, q{Unsupport option type found}, q{--} . $_
                   if ( not defined( $opts->{qq{$_}}->{value} ) );
             }
-          }
-          grep { exists $opts->{qq{$_}}->{value} ? 0 : 1; } keys %{$opts};
-    } values %{ $cmd->{operation} };
+        }
+    }
 }
 
 sub audit_options {
@@ -1886,9 +1934,9 @@ sub audit_options {
           : $you;
     };
 
-    map {
+    for ( qq{$mode}, q[shared] ) {
         my $opt_chk_hash_ref = $default->{qq[$_]}->{q[options checking]};
-        map {
+        for ( keys %{$opt_chk_hash_ref} ) {
             my $checking_type = $_;
                 $checking_type eq q{just one and only one} ? goto AUDIT_OPTIONS_JUST_ONE_AND_ONLY_ONE
               : $checking_type eq q{neccessary}            ? goto AUDIT_OPTIONS_NECCESSARY
@@ -1896,7 +1944,7 @@ sub audit_options {
               :                                              goto AUDIT_OPTIONS_ERROR;
 
           AUDIT_OPTIONS_JUST_ONE_AND_ONLY_ONE:
-            map {
+            for ( keys %{ $opt_chk_hash_ref->{qq{$checking_type}} } ) {
                 my $chk_item_key  = $_;
                 my $chk_item      = $opt_chk_hash_ref->{qq{$checking_type}}->{qq{$chk_item_key}};
                 my $chk_item_type = ref $chk_item;
@@ -1915,19 +1963,19 @@ sub audit_options {
                 croak join q{: }, ( join q{ }, q{Please enable one}, $chk_item_key, q{by one of following options} ),
                   ( join q{ }, map { q{--} . $_ } @{$chk_item} )
                   if ( scalar(@enabled) == 0 );
-            } keys %{ $opt_chk_hash_ref->{qq{$checking_type}} };
+            }
             goto AUDIT_OPTIONS_NEXT;
 
           AUDIT_OPTIONS_NECCESSARY:
-            map {
+            for ( @{ $opt_chk_hash_ref->{qq{$checking_type}} } ) {
                 croak join q{: }, q{The option must be set}, q{--} . $_
                   if ( not &$is_true( $cmd->{operation}->{qq[$mode]}->{qq{$_}}->{value} ) );
-            } @{ $opt_chk_hash_ref->{qq{$checking_type}} };
+            }
             goto AUDIT_OPTIONS_NEXT;
 
           AUDIT_OPTIONS_ASSOCIATE:
 
-            map {
+            for ( keys %{ $opt_chk_hash_ref->{qq{$checking_type}} } ) {
                 my $chk_item_key     = $_;
                 my $chk_item         = $opt_chk_hash_ref->{qq{$checking_type}}->{qq{$chk_item_key}};
                 my @failed_associate = grep {
@@ -1939,7 +1987,7 @@ sub audit_options {
                   ( join qq{\n}, map { q{ } x 4 . q{--} . $_ } @failed_associate )
                   if ( scalar(@failed_associate) != 0 );
 
-            } keys %{ $opt_chk_hash_ref->{qq{$checking_type}} };
+            }
 
             goto AUDIT_OPTIONS_NEXT;
 
@@ -1948,8 +1996,8 @@ sub audit_options {
             goto AUDIT_OPTIONS_NEXT;
 
           AUDIT_OPTIONS_NEXT:
-        } keys %{$opt_chk_hash_ref};
-    } ( qq{$mode}, q[shared] );
+        }
+    }
 }
 
 # Unless there is a bug, I do want to fix nothing about this function.
@@ -2001,8 +2049,9 @@ sub select_operation_mode {
       if ( scalar(@enabled_modes) == 0 );
 
     # Welcome mode options go home.
-    map { $cmd->{operation}->{shared}->{qq{$_}} = $cmd->{operation}->{mode}->{qq{$_}}; }
-      keys %{ $cmd->{operation}->{mode} };
+    for ( keys %{ $cmd->{operation}->{mode} } ) {
+        $cmd->{operation}->{shared}->{qq{$_}} = $cmd->{operation}->{mode}->{qq{$_}};
+    }
 
     Getopt::Long::Configure(q{no_pass_through});
     return $rc;
@@ -2084,16 +2133,24 @@ sub process_options {
     delete $cmd->{operation}->{shared};
 
     # OK, to run the pre audit functions.
-    map { &{ $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[pre audit]} }( $cmd, $default ); }
-      grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[pre audit]}; }
-      sort keys %{ $cmd->{operation}->{qq[$mode]} };
+    for (
+        grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[pre audit]}; }
+        sort keys %{ $cmd->{operation}->{qq[$mode]} }
+      )
+    {
+        &{ $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[pre audit]} }( $cmd, $default );
+    }
 
     audit_options( $cmd, $default );
 
     # OK, to run the post audit functions.
-    map { &{ $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[post audit]} }( $cmd, $default ); }
-      grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[post audit]}; }
-      sort keys %{ $cmd->{operation}->{qq[$mode]} };
+    for (
+        grep { exists $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[post audit]}; }
+        sort keys %{ $cmd->{operation}->{qq[$mode]} }
+      )
+    {
+        &{ $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{qq[post audit]} }( $cmd, $default );
+    }
 
     return $rc;
 }
