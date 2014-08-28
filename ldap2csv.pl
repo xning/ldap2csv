@@ -1,10 +1,4 @@
-#!/bin/sh
-eval 'if ! perl --version >/dev/null 2>&1;then echo "No Perl interpreter found" >&2;exit 1;fi';
-
-#! -*-perl-*-
-eval 'exec perl -x -wS $0 ${1+"$@"}'
-  if 0;
-
+#!/usr/bin/perl
 use warnings;
 use strict;
 use feature qw(say);
@@ -48,6 +42,8 @@ sub _pre_audit_for_csv;
 sub _pre_audit_for_ldif;
 sub _post_audit_for_url;
 sub _pre_audit_for_config;
+sub _pre_autit_for_source;
+sub _post_autit_for_source;
 sub _output_ldif_for_collect;
 sub _output_sqlite3_for_collect;
 sub _output_csv_for_collect;
@@ -276,6 +272,7 @@ my $default = {
             ? $ENV{HOME} . q{.ldap2csv.ini}
             : $ENV{HOME} . q{/} . q{.ldap2csv.ini},
             q{system config file} => q{/etc/ldap2csv.ini},
+            q{source form}        => q{file},
         },
     },
     q{probe} =>
@@ -369,6 +366,13 @@ q{Ouput SQL statements that you can use to create a SQLite3 database. If give a 
             q{type} => q{s},
             q{help} =>
 q{Set a file as data source. The file may be SQLite3 table, csv, or LDIF file. Not all work modes support this option.},
+            q{form} => {
+                q{ldap} => [ q{ldap}, q{ldaps}, q{ldapi}, ],
+                q{file} => [ q{file}, ],
+            },
+            q{result}     => {},
+            q{pre audit}  => \&_pre_autit_for_source,
+            q{post audit} => \&_post_autit_for_source,
         },
         q{version} => {
             q{help}     => q{Show the program version, then quit.},
@@ -1117,6 +1121,15 @@ sub select_operation_mode {
     my ( $cmd, $default ) = @_;
     my $rc            = 1;
     my @enabled_modes = qw();
+
+    # Scan each option, if find some work mode, modify the name to
+    # an regular option. F.g, transfer 'collect' to '--collect'.
+    for my $idx ( 0 .. $#ARGV ) {
+        my $argv = $ARGV[$idx];
+        if ( any { $_ eq qq[$argv] } keys %{ $cmd->{operation}->{mode} } ) {
+            $ARGV[$idx] = q{--} . $argv;
+        }
+    }
 
     no strict 'subs';
 
@@ -2143,4 +2156,37 @@ sub _output_ldif_for_tree2csv {
     my ( $cmd, $default ) = @_;
     my $mode = q{tree2csv};
     croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
+}
+
+sub _pre_autit_for_source {
+    my ( $cmd, $default ) = @_;
+    my ( $mode, $ref, $source );
+    $mode   = get_enabled_mode( $cmd, $default );
+    $ref    = $cmd->{operation}->{qq[$mode]}->{source};
+    $source = $ref->{value};
+    for my $subtype ( keys %{ $ref->{form} } ) {
+        my $str = join q{ | }, map { q{\A} . $_ . q{://} } @{ $ref->{form}->{qq[$subtype]} };
+        my $re = qr{ $str }mxsi;
+        if ( $source =~ $re ) {
+            $ref->{result}->{form} = $subtype;
+            last;
+        }
+    }
+    $ref->{result}->{form} = $default->{shared}->{default}->{q[source form]} if ( not exists $ref->{result}->{form} );
+    if ( $ref->{result}->{form} eq q{ldap} ) {
+        $cmd->{operation}->{qq[$mode]}->{url}->{value} = $ref->{value};
+        $ref->{value} = q{};
+    }
+    elsif ( $ref->{result}->{form} eq q{file} ) {
+        if ( $source =~ m{(?:\Afile://(.*)\z)}mxsi ) {
+            $ref->{value} = $1;
+        }
+    }
+}
+
+sub _post_autit_for_source {
+    my ( $cmd, $default ) = @_;
+    my ( $mode, $source );
+    $mode = get_enabled_mode( $cmd, $default );
+    $source = $cmd->{operation}->{qq[$mode]}->{source}->{value};
 }
