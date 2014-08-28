@@ -1,4 +1,4 @@
-.TH LDAP2CSV.PL "1" "August 2014" "ldap2csv.pl 0.1.2" "User Commands"
+.TH LDAP2CSV.PL "1" "August 2014" "ldap2csv.pl 0.1.4" "User Commands"
 .SH NAME
 ldap2csv.pl \- Transfer ldap tree data to csv
 .SH SYNOPSIS
@@ -43,17 +43,17 @@ The
 At last a mode and a source option is needed.
 .SS To select a mode:
 .TP
-\fB\-\-schema\fR
+\fB\-\-schema, schema\fR
 Enalbe schema work mode, get LDAP schema from LDAP server or other data sources, then display the schema or output the schema to STDOUT or other files. Only support LDIF output format.
 .TP
-\fB\-\-probe\fR
+\fB\-\-probe, probe\fR
 Persons, web servers, and printers, etc., in LDAP terms, are one of some objectclasses. This mode display all objectclasses names if no --is option,
 or display some objectclasses details and the objectclasses' parent objectclasses details.
 .TP
-\fB\-\-collect\fR
+\fB\-\-collect, collect\fR
 Enable collect work mode to collect some who's data, in LDAP terms, some objects' data, from LDAP server. This the default action.
 .TP
-\fB\-\-tree2csv\fR
+\fB\-\-tree2csv, tree2csv\fR
 Enable tree2csv work mode to transfer a tree to csv so shell can easily do more, and this mode will do rescursion, or just use collect work mode is enough.
 .SS Modes shared options:
 .PP
@@ -183,21 +183,19 @@ work mode. While, if we are lazy (that's true, we are always lazy), or we don't 
 .IP
 ldap2csv.pl \fB\-\-help\fR
 .IP
-ldap2csv.pl \fB\-\-probe\fR \fB\-\-url\fR url [\-\-is who]
+ldap2csv.pl \fBprobe\fR \fB\-\-url\fR url [\-\-is who]
 .IP
-ldap2csv.pl \fB\-\-probe\fR \fB\-\-source\fR ldif [\-\-is who]
+ldap2csv.pl \fBprobe\fR \fB\-\-source\fR ldif [\-\-is who]
 .IP
-ldap2csv.pl \fB\-\-schema\fR \fB\-\-url\fR url [\-\-output ldif]
+ldap2csv.pl \fBschema\fR \fB\-\-url\fR url [\-\-output ldif]
 .IP
-ldap2csv.pl \fB\-\-schema\fR \fB\-\-source\fR ldif [\-\-output ldif]
+ldap2csv.pl \fBschema\fR \fB\-\-source\fR ldif [\-\-output ldif]
 .IP
-ldap2csv.pl \fB\-\-collect\fR \fB\-\-url\fR url [\-\-sql|\-\-csv|\-\-ldif] [\-\-output file] \fB\-\-is\fR who [[--relation attribute] ...]
+ldap2csv.pl \fBcollect\fR \fB\-\-url\fR url [\-\-sql|\-\-csv|\-\-ldif] [\-\-output file] \fB\-\-is\fR who [[--relation attribute] ...]
 .IP
-ldap2csv.pl \fB\-\-tree2csv\fR \fB\-\-sql\fR \fB\-\-init\fR initset \fB\-\-reliation\fR relation [\-\-output file]
+ldap2csv.pl \fBtree2csv\fR \fB\-\-csv \-\-init\fR initset \-\-reliation recursion_setting \-\-reliation relation [\-\-output file] [\-\-separator !]
 .IP
-ldap2csv.pl \fB\-\-csv \-\-init\fR initset \-\-reliation recursion_setting \-\-reliation relation [\-\-output file] [\-\-separator !]
-.IP
-ldap2csv.pl \fB\-\-sql \-\-init\fR initset \-\-reliation recursion_setting \-\-reliation relation [\-\-output file] [\-\-separator !]
+ldap2csv.pl \fBtree2csv\fR \fB\-\-sql \-\-init\fR initset \-\-reliation recursion_setting \-\-reliation relation [\-\-output file] [\-\-separator !]
 .SH AUTHOR
 Written by Xibo Ning.
 .SH "REPORTING BUGS"

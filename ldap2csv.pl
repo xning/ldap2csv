@@ -31,6 +31,7 @@ sub probe;
 sub schema;
 sub collect;
 sub tree2csv;
+sub http;
 
 sub construct_objectclasses_tree;
 sub get_objectclasses_attrs;
@@ -49,6 +50,8 @@ sub _output_sqlite3_for_collect;
 sub _output_csv_for_collect;
 sub _output_csv_for_tree2csv;
 sub _output_ldif_for_tree2csv;
+sub _pre_audit_for_http;
+sub _post_audit_for_http;
 
 #####################################################################
 # If we import some modules at runtime, we have a chance to do more.#
@@ -56,7 +59,8 @@ sub _output_ldif_for_tree2csv;
 # Once a "BEGIN" has run, it is immediately undefined and any code  #
 # it used is returned to Perl's memory pool.                        #
 # You can just skip the following long and urgly codes, just think  #
-# they are something like 'use mod'.
+# they are something like 'use mod'.                                #
+# NOTE: WE DO NOT PASS eval fuction ANY USER INPUTS.                #
 #####################################################################
 BEGIN {
     my $version = q{0.1.4};
@@ -248,10 +252,7 @@ binmode STDERR, q[:utf8];
 my $default = {
     q{shared} => {
         q{options checking} => {
-            q{just one and only one} => {
-                q{output format} => [ q{sql},     q{csv},      q{ldif}, ],
-                q{mode}          => [ q{collect}, q{tree2csv}, q{probe}, q{schema}, ],
-            },
+            q{just one and only one} => { q{mode} => [ q{collect}, q{tree2csv}, q{probe}, q{schema}, q{http} ], },
             q{associate} => { q{csv} => [ q{separator}, ], },
         },
 
@@ -277,16 +278,15 @@ my $default = {
     },
     q{probe} =>
       { q{options checking} => { q{just one and only one} => { q{input source} => [ q{source}, q{url} ], }, }, },
-    q{schema} => {
-        q{options checking} => {
-            q{associate}             => { q{schema}       => [ q{ldif}, ], },
-            q{just one and only one} => { q{input source} => [ q{source}, q{url} ], },
-        },
-    },
+    q{schema} =>
+      { q{options checking} => { q{just one and only one} => { q{input source} => [ q{source}, q{url} ], }, }, },
     q{collect} => {
         q{options checking} => {
-            q{associate}             => { q{collect}      => [q{url}], },
-            q{just one and only one} => { q{filter types} => [ q{is}, q{maybe} ] },
+            q{associate}             => { q{collect} => [q{url}], },
+            q{just one and only one} => {
+                q{output format} => [ q{sql}, q{csv}, q{ldif}, ],
+                q{filter types}  => [ q{is},  q{maybe} ],
+            },
         },
         q{default} => {},
     },
@@ -327,9 +327,13 @@ q{Enable collect work mode to collect some who's data, in LDAP terms, some objec
         q{tree2csv} => {
             q{help} =>
 q{Enable tree2csv work mode to transfer a tree to csv so shell can easily do more. If need, this mode will do rescursion.},
-            q{pre audit} => \&_pre_audit_for_tree2csv,
-
+            q{pre audit}  => \&_pre_audit_for_tree2csv,
             q{post audit} => \&_post_audit_for_tree2csv,
+        },
+        q{http} => {
+            q{help}       => q{Run as a HTTP server, and will try to start a brower.},
+            q{pre audit}  => \&_pre_audit_for_http,
+            q{post audit} => \&_post_audit_for_http,
         },
         q{verbose} => { q{help} => q{Output verbosely. No effect now.}, },
         q{verify}  => { q{help} => q{Whether verify LDAP server SSL certificate. Default is not to.}, },
@@ -422,7 +426,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
         q{mode} => {
 
             # Here options settings will copy to chosen mode after processing options.
-            q{options} => [ q{schema}, q{probe}, q{collect}, q{tree2csv}, ],
+            q{options} => [ q{schema}, q{probe}, q{collect}, q{tree2csv}, q{http} ],
         },
 
         q{shared} => {
@@ -532,6 +536,13 @@ sub tree2csv {
       grep { $cmd->{operation}->{qq[$mode]}->{qq[$_]}->{value} } keys %{ $cmd->{output}->{qq[$mode]} };
 
     &{ $cmd->{output}->{qq[$mode]}->{qq[$output_format]} }( $cmd, $default );
+}
+
+sub http {
+    my ( $cmd, $default, ) = @_;
+
+    my $mode = q{tree2csv};
+    say Dumper($cmd);
 }
 
 sub tree2csv_rec_func_for_sql {
@@ -1282,8 +1293,7 @@ sub process_options {
 
 sub _pre_audit_for_tree2csv {
     my ( $cmd, $default ) = @_;
-
-    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    my $mode = get_enabled_mode( $cmd, $default );
     return if ( $mode ne q{tree2csv} );
     croak join q{ }, q{The work mode}, $mode, q{need the --source option.}
       if ( !$cmd->{operation}->{qq[$mode]}->{source}->{value} );
@@ -1515,9 +1525,8 @@ sub _pre_audit_for_tree2csv {
 
 sub _post_audit_for_tree2csv {
     my ( $cmd, $default ) = @_;
-
-    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
     croak q{The work mode } . $mode . q{ requires more than one relation.}
       if ( $mode eq q{tree2csv}
         and scalar( @{ $cmd->{operation}->{qq[$mode]}->{relation}->{value} } ) <= 1 );
@@ -1528,7 +1537,8 @@ sub _output_sqlite3_for_collect {
     my ( $mode, $search, $schema, $objectclasses );
     my ( $sqlite, $dbh, $db, $tbl, $create_tbl_stm, $drop_tbl_stm, $insert_tbl_stm, $prefix_of_insert_tbl_stm );
     my ( $attr, $attr_from_argument );
-    $mode = q{collect};
+    $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{collect} );
     $search = get_ldap_from_net( $cmd, $default );
 
     $schema = get_schema_from_net( $cmd, $default );
@@ -1710,7 +1720,8 @@ sub _output_sql_for_tree2csv {
 
     # We do not simply read all the data into memory because the data may be big.
     my ( $cmd, $default ) = @_;
-    my $mode = q{tree2csv};
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
     my ( $origin_size, $at_last_size ) = qw(0 0);
     my ( $init_set, $result_set, $processed_init_set );
 
@@ -2047,6 +2058,9 @@ sub _output_sql_for_tree2csv {
 sub _pre_audit_for_csv {
     my ( $cmd, $default ) = @_;
     my $mode = get_enabled_mode( $cmd, $default );
+
+    return if ( not $cmd->{operation}->{qq[$mode]}->{csv}->{value} );
+
     $cmd->{operation}->{qq[$mode]}->{separator}->{value} = q{!}
       if ( !$cmd->{operation}->{qq[$mode]}->{separator}->{value} );
 }
@@ -2054,9 +2068,10 @@ sub _pre_audit_for_csv {
 sub _pre_audit_for_ldif {
     my ( $cmd, $default ) = @_;
     my $modes_to_enable_this = [ q{schema}, ];
-    my $output = [ q{sql}, q{csv}, q{ldif}, ];
-    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
+    my $output               = [ q{sql}, q{csv}, q{ldif}, ];
+    my $mode                 = get_enabled_mode( $cmd, $default );
     croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    return if ( not $cmd->{operation}->{qq[$mode]}->{ldif}->{value} );
     my @find_mode_to_enable_this = grep { $mode eq $_ } @{$modes_to_enable_this};
 
     # Enable LDIF output format for some mode, f.g., schema.
@@ -2079,11 +2094,10 @@ sub _post_audit_for_url {
     my ( $schema, $port, $addr ) = qw(ldap 389);
     my $lc_schema;
 
-    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( not $cmd->{operation}->{qq[$mode]}->{url}->{value} );
 
     my $url = $cmd->{operation}->{qq[$mode]}->{url}->{value};
-    return if ( !$url );
 
     if ( $url =~ m{\A(?>((?<schema>[^:]+)://)* (?<addr>[^:]+):* ((?<port>\d{1,5}))*)\z}imxs ) {
         $schema = $+{schema} if ( exists $+{schema} );
@@ -2114,8 +2128,8 @@ sub _post_audit_for_url {
 
 sub _pre_audit_for_config {
     my ( $cmd, $default ) = @_;
-    my ($mode) = grep { $cmd->{operation}->{mode}->{qq[$_]}->{value}; } keys %{ $cmd->{operation}->{mode} };
-    croak q{Failed to parse url because of no enabled mode found.} if ( !$mode );
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( not $cmd->{operation}->{qq[$mode]}->{config}->{value} );
     croak join q{ }, q{Config file does not exists or is not readable:},
       $cmd->{operation}->{qq[$mode]}->{config}->{value}
       if (
@@ -2126,7 +2140,8 @@ sub _pre_audit_for_config {
 
 sub _output_ldif_for_collect {
     my ( $cmd, $default ) = @_;
-    my $mode = q{collect};
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{collect} );
     my $search = get_ldap_from_net( $cmd, $default );
 
     if ( $cmd->{operation}->{qq[$mode]}->{ldif}->{value} ) {
@@ -2143,25 +2158,29 @@ sub _output_ldif_for_collect {
 sub _output_csv_for_collect {
     my ( $cmd, $default ) = @_;
     my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{collect} );
     &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
 }
 
 sub _output_csv_for_tree2csv {
     my ( $cmd, $default ) = @_;
-    my $mode = q{tree2csv};
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
     &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
 }
 
 sub _output_ldif_for_tree2csv {
     my ( $cmd, $default ) = @_;
-    my $mode = q{tree2csv};
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
     croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
 }
 
 sub _pre_autit_for_source {
     my ( $cmd, $default ) = @_;
     my ( $mode, $ref, $source );
-    $mode   = get_enabled_mode( $cmd, $default );
+    $mode = get_enabled_mode( $cmd, $default );
+    return if ( not $cmd->{operation}->{qq[$mode]}->{source}->{value} );
     $ref    = $cmd->{operation}->{qq[$mode]}->{source};
     $source = $ref->{value};
     for my $subtype ( keys %{ $ref->{form} } ) {
@@ -2186,7 +2205,22 @@ sub _pre_autit_for_source {
 
 sub _post_autit_for_source {
     my ( $cmd, $default ) = @_;
-    my ( $mode, $source );
+    my ( $mode, $ref, $source, $type );
     $mode = get_enabled_mode( $cmd, $default );
-    $source = $cmd->{operation}->{qq[$mode]}->{source}->{value};
+    return if ( not $cmd->{operation}->{qq[$mode]}->{source}->{value} );
+    $ref    = $cmd->{operation}->{qq[$mode]}->{source};
+    $source = $ref->{value};
+    $type   = $ref->{result}->{form};
+    return if ( $type ne q{file} );
+
+}
+
+sub _pre_audit_for_http {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+}
+
+sub _post_audit_for_http {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
 }
