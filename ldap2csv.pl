@@ -52,6 +52,8 @@ sub _output_csv_for_tree2csv;
 sub _output_ldif_for_tree2csv;
 sub _pre_audit_for_http;
 sub _post_audit_for_http;
+sub _pre_audit_for_port;
+sub _pre_audit_for_addr;
 
 #####################################################################
 # If we import some modules at runtime, we have a chance to do more.#
@@ -298,6 +300,12 @@ my $default = {
         },
         q{default} => {},
     },
+    q{http} => {
+        q{default} => {
+            q{port} => q{8080},
+            q{addr} => q{localhost},
+        },
+    },
     q{program} => {
         q{version} => $VERSION,
         q{name}    => basename($0),
@@ -420,6 +428,16 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
             q{type}      => q{s},
             q{pre audit} => \&_pre_audit_for_config,
         },
+        q{port} => {
+            q{help}      => q{Listen port.},
+            q{type}      => q{s},
+            q{pre audit} => \&_pre_audit_for_port,
+        },
+        q{addr} => {
+            q{help}      => q{Listen address.},
+            q{type}      => q{s},
+            q{pre audit} => \&_pre_audit_for_addr,
+        },
     },
 
     q{operation} => {
@@ -442,6 +460,7 @@ q{Set relations for tree2csv work mode, or set attributes for collect work mode 
 
         q{collect}  => { q{options} => [ q{is},   q{url}, q{maybe}, q{relation}, ], },
         q{tree2csv} => { q{options} => [ q{init}, q{relation}, ], },
+        q{http}     => { q{options} => [ q{port}, q{addr}, ], },
     },
     q{output} => {
         q{collect} => {
@@ -889,22 +908,23 @@ sub usage {
     say q{USAGE:};
     for (
         join( q{ }, q{--help}, ),
-        join( q{ }, q{--probe},  q{--url url},     q{[--is who]} ),
-        join( q{ }, q{--probe},  q{--source ldif}, q{[--is who]} ),
-        join( q{ }, q{--schema}, q{--url url},     q{[--output ldif]} ),
-        join( q{ }, q{--schema}, q{--source ldif}, q{[--output ldif]} ),
-        join( q{ }, q{--collect}, q{--url url}, q{[--ldif]}, q{[--output file]}, q{--is who} ),
+        join( q{ }, q{help}, ),
+        join( q{ }, q{probe},  q{--url url},     q{[--is who]} ),
+        join( q{ }, q{probe},  q{--source ldif}, q{[--is who]} ),
+        join( q{ }, q{schema}, q{--url url},     q{[--output ldif]} ),
+        join( q{ }, q{schema}, q{--source ldif}, q{[--output ldif]} ),
+        join( q{ }, q{collect}, q{--url url}, q{[--ldif]}, q{[--output file]}, q{--is who} ),
         join( q{ },
-            q{--collect}, q{--url url}, q{[--sql|--csv]}, q{[--output file]},
+            q{collect}, q{--url url}, q{[--sql|--csv]}, q{[--output file]},
             q{--is who}, q{[[--realtion attrbute] ...]} ),
         join( q{ },
-            q{--tree2csv}, q{--sql},
+            q{tree2csv}, q{--sql},
             q{--init initset},
             q{--reliation relation rescursion_setting},
             q{--reliation relation},
             q{[--output file]} ),
         join( q{ },
-            q{--tree2csv}, q{--csv},
+            q{tree2csv}, q{--csv},
             q{--init initset},
             q{--reliation relation rescursion_setting},
             q{--reliation relation},
@@ -931,7 +951,7 @@ sub usage {
         say wrap (
             q{},
             q{ } x ( $option_placeholder + $tab ),
-            q{--} . $_ . q{ } x ( $option_placeholder - length($_) ),
+            $_ . q{ } x ( $option_placeholder - length($_) ),
             $cmd->{operation}->{mode}->{$_}->{help}
         );
     }
@@ -962,6 +982,11 @@ sub usage {
         print "\n";
     }
 
+    my $notice = join q{ }, q{It is best practice that always give work mode option as the first},
+      q{argument, especially when you have some argument are the same with the},
+      q{work mode name. You can avoid these trobule by always using options},
+      q{such as '--schema' instead of 'schema'.};
+    say wrap( q{}, q{}, $notice );
     exit(0);
 }
 
@@ -1135,12 +1160,8 @@ sub select_operation_mode {
 
     # Scan each option, if find some work mode, modify the name to
     # an regular option. F.g, transfer 'collect' to '--collect'.
-    for my $idx ( 0 .. $#ARGV ) {
-        my $argv = $ARGV[$idx];
-        if ( any { $_ eq qq[$argv] } keys %{ $cmd->{operation}->{mode} } ) {
-            $ARGV[$idx] = q{--} . $argv;
-        }
-    }
+    my $argv = $ARGV[0];
+    $ARGV[0] = q{--} . $argv if ( any { $_ eq qq[$argv] } ( keys %{ $cmd->{operation}->{mode} }, q{help} ) );
 
     no strict 'subs';
 
@@ -2223,4 +2244,20 @@ sub _pre_audit_for_http {
 sub _post_audit_for_http {
     my ( $cmd, $default ) = @_;
     my $mode = get_enabled_mode( $cmd, $default );
+}
+
+sub _pre_audit_for_port {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( not $mode eq q{http} );
+    $cmd->{operation}->{qq[$mode]}->{port}->{value} = $default->{http}->{default}->{port}
+      if ( not $cmd->{operation}->{qq[$mode]}->{port}->{value} );
+}
+
+sub _pre_audit_for_addr {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( not $mode eq q{http} );
+    $cmd->{operation}->{qq[$mode]}->{addr}->{value} = $default->{http}->{default}->{addr}
+      if ( not $cmd->{operation}->{qq[$mode]}->{addr}->{value} );
 }

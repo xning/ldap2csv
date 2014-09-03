@@ -20,7 +20,7 @@ has
 .I collect
 , and
 .I tree2csv
-work modes. Some of these work modes except getting data from LDAP server, could treate files as data source and read data in from the files.
+work modes. Some of these work modes except getting data from LDAP server, could treate files as data source and read data in from the files. And you should always give work mode as the first option.
 .PP
 And it supports
 .I LDIF
