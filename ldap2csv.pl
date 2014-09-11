@@ -50,6 +50,7 @@ sub _output_sqlite3_for_collect;
 sub _output_csv_for_collect;
 sub _output_csv_for_tree2csv;
 sub _output_ldif_for_tree2csv;
+sub _output_sql_for_tree2csv;
 sub _pre_audit_for_http;
 sub _post_audit_for_http;
 sub _pre_audit_for_port;
@@ -492,7 +493,6 @@ sub main {
 
     process_options( $cmd, $default );
     dispatch_actions( $cmd, $default );
-
 }
 
 sub dispatch_actions {
@@ -500,7 +500,6 @@ sub dispatch_actions {
 
     my $mode = get_enabled_mode( $cmd, $default );
     croak q{None mode is enabled.} if ( !$mode );
-
     eval qq[$mode] . q{( $cmd, $default )};
 }
 
@@ -872,7 +871,7 @@ sub verbose {
 # The worst solution. Can we find a better way?
 sub is_text_file {
     my ($file) = @_;
-    my $known_types = [ q{text/x-ldif}, q{text/csv}, q{application/x-sqlite3} ];
+    my $known_types = [ q{text/x-ldif}, q{text/x-sql}, q{text/csv}, q{application/x-sqlite3} ];
     croak q{File not found or is not readable: } . $file . q{.} if ( not( -e $file and -r $file ) );
     my ( $magic, $text_magic ) = ( q{}, q{} );
     my ( $h, $t ) = tempfile( UNLINK => 1, EXLOCK => 0 );
@@ -880,6 +879,7 @@ sub is_text_file {
     close $h;
     $text_magic = mimetype($t);
     $magic      = mimetype($file);
+
     return 1 if ( $magic =~ m{\Atext/} );
     return $text_magic eq $magic;
 }
@@ -1387,6 +1387,9 @@ sub _pre_audit_for_tree2csv {
         if ( not @attrs_from_source or scalar(@attrs_from_source) <= 1 ) {
             $default->{tree2csv}->{init}->{q[source type]} = q{ldif};
         }
+        elsif ( ( mimetype($source) ) eq q{text/x-sql} ) {
+            $default->{tree2csv}->{init}->{q[source type]} = q{sql};
+        }
         else {
             my %attr_from_source_hash;
             for (@attrs_from_source) {
@@ -1417,7 +1420,6 @@ sub _pre_audit_for_tree2csv {
             $default->{tree2csv}->{init}->{q[source type]} = q{sql};
         }
     }
-
     if ( $default->{tree2csv}->{init}->{q[source type]} eq q{sql} ) {
         $default->{shared}->{DBI}->{database} = $cmd->{operation}->{qq[$mode]}->{source}->{value};
         my ( $tbl, $sqlite, $dbh, $sth, $db, @row, $sql );
@@ -1739,6 +1741,20 @@ sub _output_sqlite3_for_collect {
     }
     $dbh->disconnect if ( $cmd->{operation}->{qq[$mode]}->{sql}->{value} );
 
+}
+
+sub _output_csv_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
+    &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
+}
+
+sub _output_ldif_for_tree2csv {
+    my ( $cmd, $default ) = @_;
+    my $mode = get_enabled_mode( $cmd, $default );
+    return if ( $mode ne q{tree2csv} );
+    croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
 }
 
 sub _output_sql_for_tree2csv {
@@ -2185,20 +2201,6 @@ sub _output_csv_for_collect {
     my $mode = get_enabled_mode( $cmd, $default );
     return if ( $mode ne q{collect} );
     &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
-}
-
-sub _output_csv_for_tree2csv {
-    my ( $cmd, $default ) = @_;
-    my $mode = get_enabled_mode( $cmd, $default );
-    return if ( $mode ne q{tree2csv} );
-    &{ $cmd->{output}->{qq[$mode]}->{sql} }( $cmd, $default );
-}
-
-sub _output_ldif_for_tree2csv {
-    my ( $cmd, $default ) = @_;
-    my $mode = get_enabled_mode( $cmd, $default );
-    return if ( $mode ne q{tree2csv} );
-    croak join q{ }, q{The}, $mode, q{work mode do not support output ldif format.};
 }
 
 sub _pre_autit_for_source {
