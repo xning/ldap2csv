@@ -84,10 +84,13 @@ BEGIN {
         q{Text::CSV_XS},      q{Config::IniFiles}, q{Log::Log4perl},
     ];
 
-    push @{$simple_mods}, q{Carp} if ( exists $ENV{LDAP2CSV_DEVEL} and $ENV{LDAP2CSV_DEVEL} );
-
-    eval join q{ }, q{sub croak}, ( join qq{\n}, q[{], q{verbose @_;}, q{exit 1;}, q[}] )
-      if ( not exists $ENV{LDAP2CSV_DEVEL} or !$ENV{LDAP2CSV_DEVEL} );
+    if ( exists $ENV{LDAP2CSV_DEVEL} and $ENV{LDAP2CSV_DEVEL} ) {
+        push @{$simple_mods}, q{Carp};
+    }
+    else {
+        no warnings;
+        eval join q{ }, q{sub croak}, ( join qq{\n}, q[{], q{verbose @_;}, q{exit 1;}, q[}] );
+    }
 
     my $mod_need = {
         q{version} => {
@@ -1160,6 +1163,7 @@ sub select_operation_mode {
 
     # Scan each option, if find some work mode, modify the name to
     # an regular option. F.g, transfer 'collect' to '--collect'.
+    $ARGV[0] = q{help} if ( $#ARGV == -1 );
     my $argv = $ARGV[0];
     $ARGV[0] = q{--} . $argv if ( any { $_ eq qq[$argv] } ( keys %{ $cmd->{operation}->{mode} }, q{help} ) );
 
